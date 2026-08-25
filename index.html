@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Shared Roll 管理後台</title>
+<!--
+  管理後台那一頁(#74)。
+
+  產品負責人 2026-08-25 在票上拍板走**獨立網頁後台**(路 B):他自己登入的小網頁,不動 App、
+  需求規格書 3 的「App 內嚴禁任何管理介面」紅線不必改——那條擋的是消費者拿得到的 App 裡長出
+  管理介面,這一頁住在 App 外面,而且只有名單上的帳號叫得動。Studio 那條路也留著,沒有取代。
+
+  ## 為什麼是一份靜態檔,不是 Edge Function
+
+  第一版做成 Edge Function(與 ecpay-checkout 同一招:回一整頁 HTML)。部署起來了、網址也通,
+  但**瀏覽器拿到的是原始碼而不是網頁**:沒有自訂網域的專案,GET 回 text/html 會被平台改寫成
+  text/plain 並套上 `default-src 'none'; sandbox` 的 CSP
+  (supabase.com/docs/guides/functions/limits)。自訂網域是付費加購,官方也明說它不是拿來託管
+  前端的。所以這一頁改放 GitHub Pages——那是這個專案已經在用、而且不用錢的地方。
+
+  ## 這一份是公開的,而它不該讓任何人多做得了一件事
+
+  底下那三個常數(專案網址、publishable key、Google client id)本來就都是公開的,App 的
+  app.json 裡也是明文,而且會跟著安裝檔散到每一支手機上。它們**識別**專案,不**授權**任何事。
+
+  真正的門在資料庫:每一支 admin RPC 第一件事都是問 `is_admin()`,而 `admins` 那張表 RLS 開著
+  卻一條政策都不給,對 client 角色等於不存在。把這一頁的網址貼給別人,他看到的是一個登入畫面;
+  登進去之後看到的是「這個帳號還不是管理員」。這一頁把按鈕藏起來只是禮貌,不是防線。
+-->
+<style>
+  :root {
+    --bg: #0E0C0A; --panel: #1A1410; --divider: #2A2622;
+    --text: #EDE4D3; --muted: #B5A88F; --accent: #C9C4BC;
+    --ok: #7FB069; --bad: #D98A6A;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif;
+    font-size: 16px; line-height: 1.6;
+  }
+  main { max-width: 520px; margin: 0 auto; display: grid; gap: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 16px; margin: 0 0 12px; font-weight: 600; }
+  section {
+    background: var(--panel); border: 1px solid var(--divider);
+    border-radius: 14px; padding: 16px;
+  }
+  label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 12px; margin-bottom: 12px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--divider); border-radius: 10px;
+    font-size: 16px; font-family: inherit;
+  }
+  /* 房間碼與兌換碼是照著螢幕唸出來打的,等寬字才分得出 0 和 O。 */
+  input.code, .code-out { font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 0.08em; }
+  button {
+    width: 100%; padding: 13px; border-radius: 10px; border: 1px solid var(--accent);
+    background: transparent; color: var(--text); font-size: 16px; font-family: inherit;
+    cursor: pointer; min-height: 48px;
+  }
+  button:active { opacity: 0.7; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .out { margin-top: 12px; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+  .code-out { font-size: 26px; color: var(--text); letter-spacing: 0.12em; }
+  pre {
+    background: var(--bg); border: 1px solid var(--divider); border-radius: 10px;
+    padding: 12px; overflow-x: auto; font-size: 13px; margin: 12px 0 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Shared Roll 管理後台</h1>
+
+  <section id="gate">
+    <h2>先登入</h2>
+    <p class="muted">用你在 App 裡登入的那個 Google 帳號。</p>
+    <div id="gbtn"></div>
+    <div id="gateOut" class="out"></div>
+  </section>
+
+  <section id="bootstrap" hidden>
+    <h2>這個帳號還不是管理員</h2>
+    <p class="muted">把下面這一句貼進 Supabase 的 SQL Editor 按 Run,然後回來重新整理這一頁。</p>
+    <pre id="seed"></pre>
+    <button id="copySeed" type="button">複製那一句</button>
+  </section>
+
+  <section id="issue" hidden>
+    <h2>發兌換碼</h2>
+    <label for="grants">這張碼把房間升到幾張</label>
+    <input id="grants" type="number" inputmode="numeric" min="1" step="1" value="72">
+    <label for="note">備註(給自己看的,例如「資工系迎新」)</label>
+    <input id="note" type="text" autocapitalize="off">
+    <button id="issueBtn" type="button">發一張</button>
+    <div id="issueOut" class="out"></div>
+  </section>
+
+  <section id="room" hidden>
+    <h2>改房間張數</h2>
+    <p class="muted">只有<strong>還沒開始拍</strong>的房間改得動。開拍那一刻配額就鎖定並公告了,後台也不能事後改寫。</p>
+    <label for="roomCode">房間碼(6 碼)</label>
+    <input id="roomCode" class="code" type="text" autocapitalize="characters" autocomplete="off" maxlength="8">
+    <button id="findBtn" type="button">查這間房</button>
+    <div id="findOut" class="out"></div>
+    <div id="setBox" hidden>
+      <label for="total" style="margin-top:16px">改成幾張</label>
+      <input id="total" type="number" inputmode="numeric" min="1" step="1">
+      <button id="setBtn" type="button">改成這個張數</button>
+      <div id="setOut" class="out"></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+/**
+ * 都是公開值,與 App 的 app.json 一字不差(見檔頭)。抄過來而不是去讀 app.json:這一頁住在
+ * 另一個 repo 的 GitHub Pages 上,拿不到那個檔。三個值變動的時候這裡要跟著改——`test/db` 那疊
+ * 守不到這件事,因為它們不是程式邏輯,是設定。
+ */
+const SUPABASE_URL = 'https://mkqdchybsjccxlnhkqsh.supabase.co';
+const PUBLISHABLE_KEY = 'sb_publishable_Pe8FGYslT_c9Z3a8QRC_RA_AtjHfKqq';
+const GOOGLE_CLIENT_ID = '89775772955-gjemhl8cj6k3f2j9k0965smqt97klp4j.apps.googleusercontent.com';
+
+const supabase = createClient(SUPABASE_URL, PUBLISHABLE_KEY);
+const $ = (id) => document.getElementById(id);
+
+/** 把一句話寫進某個輸出區。tone 是 'ok'、'bad' 或空白。 */
+function say(id, text, tone = '') {
+  const node = $(id);
+  node.textContent = text;
+  node.className = 'out ' + tone;
+}
+
+/**
+ * 把 RPC 的錯誤翻成一句人話。
+ *
+ * 資料庫那一側對非管理員是直接拋 not-admin(而不是回一個溫和的 reason),所以這裡要認得它
+ * ——PostgREST 會把它包成一段帶著 SQLSTATE 的英文。
+ */
+function describeError(error) {
+  const raw = (error && (error.message || String(error))) || '';
+  if (raw.includes('not-admin')) return '這個帳號不在管理員名單上。';
+  if (raw.includes('invalid-total')) return '張數要是大於 0 的整數。';
+  return '出了點問題:' + raw;
+}
+
+/** 登入之後問「我是誰」,據此決定這一頁長什麼樣。 */
+async function refresh() {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return;
+
+  const { data, error } = await supabase.rpc('admin_whoami');
+  if (error) { say('gateOut', describeError(error), 'bad'); return; }
+  const me = Array.isArray(data) ? data[0] : data;
+
+  $('gate').hidden = true;
+  if (me && me.is_admin) {
+    $('issue').hidden = false;
+    $('room').hidden = false;
+    return;
+  }
+  // 名單是空的時候,這一頁要說得出「該把哪一串貼進 Studio」——不然沒有人知道怎麼開始。
+  $('bootstrap').hidden = false;
+  $('seed').textContent =
+    "insert into public.admins (user_id, note)\nvalues ('" + (me && me.user_id) + "', '產品負責人');";
+}
+
+// 登入 -------------------------------------------------------------------------
+
+window.handleGoogleCredential = async (response) => {
+  const { error } = await supabase.auth.signInWithIdToken({
+    provider: 'google',
+    token: response.credential,
+  });
+  if (error) { say('gateOut', describeError(error), 'bad'); return; }
+  await refresh();
+};
+
+const gsi = document.createElement('script');
+gsi.src = 'https://accounts.google.com/gsi/client';
+gsi.async = true;
+gsi.onload = () => {
+  google.accounts.id.initialize({
+    client_id: GOOGLE_CLIENT_ID,
+    callback: (response) => window.handleGoogleCredential(response),
+  });
+  // 用按鈕不用 One Tap:One Tap 在 Safari 與擋第三方 cookie 的瀏覽器上常常整個不出現,
+  // 而那時畫面上會什麼都沒有,看起來就像這一頁壞了。
+  google.accounts.id.renderButton($('gbtn'), { theme: 'filled_black', size: 'large', width: 320 });
+};
+gsi.onerror = () => say('gateOut', '連不到 Google 的登入元件,檢查一下網路。', 'bad');
+document.head.appendChild(gsi);
+
+// 發兌換碼 ---------------------------------------------------------------------
+
+$('issueBtn').addEventListener('click', async () => {
+  const grants = Number($('grants').value);
+  if (!Number.isInteger(grants) || grants <= 0) { say('issueOut', '張數要是大於 0 的整數。', 'bad'); return; }
+
+  $('issueBtn').disabled = true;
+  say('issueOut', '發碼中…');
+  const { data, error } = await supabase.rpc('admin_issue_code', {
+    p_grants_total_photos: grants,
+    p_note: $('note').value,
+  });
+  $('issueBtn').disabled = false;
+  if (error) { say('issueOut', describeError(error), 'bad'); return; }
+
+  const issued = Array.isArray(data) ? data[0] : data;
+  const node = $('issueOut');
+  node.className = 'out';
+  node.innerHTML = '';
+  const code = document.createElement('div');
+  code.className = 'code-out';
+  code.textContent = issued.code;
+  const hint = document.createElement('div');
+  hint.className = 'muted';
+  hint.textContent = '把這串給對方,他在房間頁輸入之後那卷會變成 ' + issued.grants_total_photos + ' 張。';
+  node.append(code, hint);
+});
+
+// 改房間張數 -------------------------------------------------------------------
+
+/** 房間狀態翻成一句人話。畫面上不該出現 shooting 這種字。 */
+const STATE_TEXT = {
+  joining: '加入期(改得動)',
+  shooting: '已經開始拍了(改不動)',
+  revealed: '已經開箱了(改不動)',
+  abandoned: '已作廢(改不動)',
+};
+
+$('findBtn').addEventListener('click', async () => {
+  $('setBox').hidden = true;
+  say('setOut', '');
+  say('findOut', '查詢中…');
+
+  const { data, error } = await supabase.rpc('admin_room_by_code', { p_code: $('roomCode').value });
+  if (error) { say('findOut', describeError(error), 'bad'); return; }
+
+  const found = Array.isArray(data) ? data[0] : data;
+  if (!found) { say('findOut', '查無這個房間碼。', 'bad'); return; }
+
+  say(
+    'findOut',
+    found.name + '\n' +
+    '現在 ' + found.total_photos + ' 張、' + found.participant_count + ' 個人\n' +
+    STATE_TEXT[found.state],
+  );
+  if (found.state === 'joining') {
+    $('total').value = found.total_photos;
+    $('setBox').hidden = false;
+    $('setBtn').dataset.roomId = found.id;
+  }
+});
+
+$('setBtn').addEventListener('click', async () => {
+  const total = Number($('total').value);
+  if (!Number.isInteger(total) || total <= 0) { say('setOut', '張數要是大於 0 的整數。', 'bad'); return; }
+
+  $('setBtn').disabled = true;
+  say('setOut', '改中…');
+  const { data, error } = await supabase.rpc('admin_set_room_photos', {
+    p_room_id: $('setBtn').dataset.roomId,
+    p_total: total,
+  });
+  $('setBtn').disabled = false;
+  if (error) { say('setOut', describeError(error), 'bad'); return; }
+
+  const outcome = Array.isArray(data) ? data[0] : data;
+  if (outcome.ok) {
+    say('setOut', '改好了,現在是 ' + outcome.total_photos + ' 張。', 'ok');
+    return;
+  }
+  say('setOut', {
+    'room-locked': '這間房已經開始拍了,張數改不動——配額在開拍那一刻就鎖定並公告了。',
+    'room-not-found': '查無這間房。',
+    'invalid-total': '張數要是大於 0 的整數。',
+  }[outcome.reason] ?? ('改不了:' + outcome.reason), 'bad');
+});
+
+// 複製那一句 bootstrap SQL ------------------------------------------------------
+
+$('copySeed').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('seed').textContent);
+    $('copySeed').textContent = '複製好了';
+  } catch {
+    // 沒有剪貼簿權限(非 https、或瀏覽器擋下來)。那一句就在上面,自己選起來複製。
+    $('copySeed').textContent = '複製不了,請手動選取上面那一段';
+  }
+});
+
+await refresh();
+</script>
+</body>
+</html>
