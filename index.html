@@ -20,6 +20,16 @@
   (supabase.com/docs/guides/functions/limits)。自訂網域是付費加購,官方也明說它不是拿來託管
   前端的。所以這一頁改放 GitHub Pages——那是這個專案已經在用、而且不用錢的地方。
 
+  ## 這一份是原始碼,線上那一份是它的複本
+
+  **這裡是真正的那一份**,連同伺服器那一側的遷移與測試。線上跑的是
+  `soymilk0211/sharedroll-admin`(公開 repo,GitHub Pages),網址:
+
+      https://soymilk0211.github.io/sharedroll-admin/
+
+  那個 repo 只是託管的地方。**改請改這裡,再把 index.html 複製過去**——反過來改的話兩邊會漂開,
+  而下一個人不會知道哪一份才算數。
+
   ## 這一份是公開的,而它不該讓任何人多做得了一件事
 
   底下那三個常數(專案網址、publishable key、Google client id)本來就都是公開的,App 的
@@ -76,6 +86,16 @@
     padding: 12px; overflow-x: auto; font-size: 13px; margin: 12px 0 0;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
+  /* 一張訂單卡。 */
+  .order {
+    border: 1px solid var(--divider); border-radius: 10px;
+    padding: 12px; margin-top: 12px;
+  }
+  .order h3 { font-size: 15px; margin: 0 0 6px; font-weight: 600; }
+  .order .who { font-size: 14px; color: var(--muted); white-space: pre-wrap; }
+  .order .acts { display: flex; gap: 8px; margin-top: 10px; }
+  .order .acts button { margin: 0; }
+  .order .copy { border-color: var(--divider); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -95,6 +115,14 @@
     <p class="muted">把下面這一句貼進 Supabase 的 SQL Editor 按 Run,然後回來重新整理這一頁。</p>
     <pre id="seed"></pre>
     <button id="copySeed" type="button">複製那一句</button>
+  </section>
+
+  <section id="orders" hidden>
+    <h2>待處理的訂單</h2>
+    <p class="muted">已付款、還沒去點點印下單的。先付款的排前面。</p>
+    <button id="reloadOrders" type="button">重新整理</button>
+    <div id="ordersOut" class="out"></div>
+    <div id="ordersList"></div>
   </section>
 
   <section id="issue" hidden>
@@ -169,8 +197,10 @@ async function refresh() {
 
   $('gate').hidden = true;
   if (me && me.is_admin) {
+    $('orders').hidden = false;
     $('issue').hidden = false;
     $('room').hidden = false;
+    void loadOrders();
     return;
   }
   // 名單是空的時候,這一頁要說得出「該把哪一串貼進 Studio」——不然沒有人知道怎麼開始。
@@ -204,6 +234,111 @@ gsi.onload = () => {
 };
 gsi.onerror = () => say('gateOut', '連不到 Google 的登入元件,檢查一下網路。', 'bad');
 document.head.appendChild(gsi);
+
+// 待處理的訂單 -----------------------------------------------------------------
+
+/**
+ * 已付款、還沒去點點印下單的訂單。
+ *
+ * Phase 1 的履行是人工的:這一區就是那份工作清單。每張卡要一眼看得到**貼得進點點印表單的
+ * 東西**——收件人、電話、郵遞區號+地址、洗幾張——所以有一顆「複製收件資料」把它整段抓走,
+ * 不必在小螢幕上逐欄選取。
+ */
+async function loadOrders() {
+  say('ordersOut', '載入中…');
+  $('ordersList').innerHTML = '';
+
+  const { data, error } = await supabase.rpc('admin_print_orders', { p_state: 'paid' });
+  if (error) { say('ordersOut', describeError(error), 'bad'); return; }
+
+  const orders = Array.isArray(data) ? data : [];
+  if (orders.length === 0) {
+    say('ordersOut', '目前沒有待處理的訂單。');
+    return;
+  }
+  say('ordersOut', orders.length + ' 張待處理');
+  for (const order of orders) {
+    $('ordersList').appendChild(orderCard(order));
+  }
+}
+
+/** 收件資料整段的樣子。複製出去直接貼進點點印。 */
+function recipientBlock(order) {
+  return order.recipient_name + '
+' + order.recipient_phone + '
+'
+    + order.recipient_zip + ' ' + order.recipient_address;
+}
+
+function orderCard(order) {
+  const card = document.createElement('div');
+  card.className = 'order';
+
+  const title = document.createElement('h3');
+  const count = order.prints === null ? '相片書' : order.prints + ' 張';
+  title.textContent = count + '・NT$' + order.amount + '・' + (order.room_name || '');
+  card.appendChild(title);
+
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent = recipientBlock(order);
+  card.appendChild(who);
+
+  const acts = document.createElement('div');
+  acts.className = 'acts';
+
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'copy';
+  copy.textContent = '複製收件資料';
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(recipientBlock(order));
+      copy.textContent = '複製好了';
+    } catch {
+      // 沒有剪貼簿權限。整段就在上面,自己選起來複製。
+      copy.textContent = '複製不了,請手動選取';
+    }
+  });
+  acts.appendChild(copy);
+
+  const done = document.createElement('button');
+  done.type = 'button';
+  done.textContent = '已在點點印下單';
+  done.addEventListener('click', () => void advance(order.id, 'submitted', done));
+  acts.appendChild(done);
+
+  card.appendChild(acts);
+  return card;
+}
+
+/**
+ * 把一張單往前推一格。
+ *
+ * **只能往前**(伺服器也擋)。按下去先鎖住按鈕:重複點會送出第二次,而第二次會拿到
+ * bad-transition——那不是錯誤,但畫面上長得像錯誤。
+ */
+async function advance(orderId, to, button) {
+  button.disabled = true;
+  const { data, error } = await supabase.rpc('admin_advance_print_order', {
+    p_order_id: orderId,
+    p_to: to,
+  });
+  if (error) { button.disabled = false; say('ordersOut', describeError(error), 'bad'); return; }
+
+  const outcome = Array.isArray(data) ? data[0] : data;
+  if (!outcome || !outcome.ok) {
+    button.disabled = false;
+    say('ordersOut', outcome && outcome.reason === 'bad-transition'
+      ? '這張單的狀態已經不是待處理了,重新整理看看。'
+      : '推不動這張單。', 'bad');
+    return;
+  }
+  // 推成功就整份重載:那張卡已經不屬於「待處理」了,留在畫面上只會讓人再點一次。
+  await loadOrders();
+}
+
+$('reloadOrders').addEventListener('click', () => void loadOrders());
 
 // 發兌換碼 ---------------------------------------------------------------------
 
