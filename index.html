@@ -343,9 +343,10 @@ async function loadOrders() {
 
 /** 收件資料整段的樣子。複製出去直接貼進點點印。 */
 function recipientBlock(order) {
-  return order.recipient_name + '
-' + order.recipient_phone + '
-'
+  // 換行一定要寫成 '\n'。在字串中間直接斷行是語法錯誤,而語法錯誤會讓整個
+  // 整段程式一行都不執行——不是只有這個函式壞掉,是整頁死當(#118)。
+  return order.recipient_name + '\n'
+    + order.recipient_phone + '\n'
     + order.recipient_zip + ' ' + order.recipient_address;
 }
 
