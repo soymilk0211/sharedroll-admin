@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
-<title>Shared Roll 管理後台</title>
+<title>SharedRoll 管理後台</title>
 <!--
   管理後台那一頁(#74)。
 
@@ -96,12 +96,24 @@
   .order .acts { display: flex; gap: 8px; margin-top: 10px; }
   .order .acts button { margin: 0; }
   .order .copy { border-color: var(--divider); }
+  /* 訂單狀態的分頁。目前這一格用實邊框,其餘用分隔線的顏色——同一排四顆,靠深淺分主次。 */
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabs button { margin: 0; padding: 9px 4px; font-size: 14px; min-height: 42px; border-color: var(--divider); }
+  .tabs button[aria-current="true"] { border-color: var(--accent); background: var(--bg); }
+  /* 這張單要洗的那幾張。縮圖點下去是高畫質檔(給點點印用的就是那一層)。 */
+  .order .photos { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .order .photos figure { margin: 0; width: 72px; }
+  .order .photos img {
+    width: 72px; height: 72px; object-fit: cover; display: block;
+    border-radius: 6px; background: var(--bg); border: 1px solid var(--divider);
+  }
+  .order .photos figcaption { font-size: 12px; color: var(--muted); text-align: center; margin-top: 3px; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Shared Roll 管理後台</h1>
+  <h1>SharedRoll 管理後台</h1>
 
   <section id="gate">
     <h2>先登入</h2>
@@ -118,8 +130,9 @@
   </section>
 
   <section id="orders" hidden>
-    <h2>待處理的訂單</h2>
-    <p class="muted">已付款、還沒去點點印下單的。先付款的排前面。</p>
+    <h2>訂單</h2>
+    <div class="tabs" id="orderTabs"></div>
+    <p class="muted" id="ordersHint"></p>
     <button id="reloadOrders" type="button">重新整理</button>
     <div id="ordersOut" class="out"></div>
     <div id="ordersList"></div>
@@ -200,6 +213,7 @@ async function refresh() {
     $('orders').hidden = false;
     $('issue').hidden = false;
     $('room').hidden = false;
+    renderTabs();
     void loadOrders();
     return;
   }
@@ -238,25 +252,90 @@ document.head.appendChild(gsi);
 // 待處理的訂單 -----------------------------------------------------------------
 
 /**
- * 已付款、還沒去點點印下單的訂單。
+ * 訂單的四格,對上資料庫狀態機的四個落點(#99)。
+ *
+ * 原本這一頁**寫死只查 paid**,而卡片上只有一顆「已在點點印下單」。按下去那張單變成
+ * submitted,卡片就從畫面上永久消失——後台沒有第二個查詢、也沒有「已出貨」的按鈕,所以那張
+ * 單再也推不動。`admin_advance_print_order` 只能往前,救不回來;使用者那一側於是永遠顯示
+ * 「沖印中」,實體照片明明已經寄到了。這不是偶發,是**每一張單都會發生**。
+ *
+ * `empty` 是這一格沒有單時要說的話。四格的空狀態意思完全不同:「待處理」空著是好事,
+ * 「出不了」空著也是好事,而「已下單」空著只是還沒輪到。
+ */
+const ORDER_TABS = [
+  {
+    state: 'paid',
+    label: '待處理',
+    hint: '收了錢、還沒去點點印下單的。先付款的排前面。',
+    empty: '目前沒有待處理的訂單。',
+  },
+  {
+    state: 'submitted',
+    label: '已下單',
+    hint: '點點印那邊在做。包裹寄出去之後回來按「已出貨」——不按的話,使用者的 App 會一直寫著「沖印中」。',
+    empty: '沒有正在做的訂單。',
+  },
+  {
+    state: 'shipped',
+    label: '已出貨',
+    hint: '做完寄出去的。留著查,沒有動作要做。',
+    empty: '還沒有出貨過的訂單。',
+  },
+  {
+    state: 'failed',
+    label: '出不了',
+    hint: '收了錢但做不出來的。⚠️ 退款要自己去綠界後台辦,系統裡沒有這條路。',
+    empty: '沒有做不出來的訂單。',
+  },
+];
+
+let currentState = 'paid';
+
+function renderTabs() {
+  const tabs = $('orderTabs');
+  tabs.innerHTML = '';
+  for (const tab of ORDER_TABS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = tab.label;
+    // aria-current 同時是樣式的鉤子與給輔助技術的訊息,不另外加一個 class。
+    if (tab.state === currentState) button.setAttribute('aria-current', 'true');
+    button.addEventListener('click', () => {
+      currentState = tab.state;
+      renderTabs();
+      void loadOrders();
+    });
+    tabs.appendChild(button);
+  }
+  $('ordersHint').textContent = ORDER_TABS.find((t) => t.state === currentState).hint;
+}
+
+/**
+ * 目前這一格的訂單。
  *
  * Phase 1 的履行是人工的:這一區就是那份工作清單。每張卡要一眼看得到**貼得進點點印表單的
  * 東西**——收件人、電話、郵遞區號+地址、洗幾張——所以有一顆「複製收件資料」把它整段抓走,
- * 不必在小螢幕上逐欄選取。
+ * 不必在小螢幕上逐欄選取;要洗哪幾張則按「看要洗哪幾張」展開(#100)。
  */
 async function loadOrders() {
+  const tab = ORDER_TABS.find((t) => t.state === currentState);
   say('ordersOut', '載入中…');
   $('ordersList').innerHTML = '';
 
-  const { data, error } = await supabase.rpc('admin_print_orders', { p_state: 'paid' });
+  const { data, error } = await supabase.rpc('admin_print_orders', { p_state: currentState });
   if (error) { say('ordersOut', describeError(error), 'bad'); return; }
 
   const orders = Array.isArray(data) ? data : [];
   if (orders.length === 0) {
-    say('ordersOut', '目前沒有待處理的訂單。');
+    say('ordersOut', tab.empty);
     return;
   }
-  say('ordersOut', orders.length + ' 張待處理');
+  // ⚠️ 這支 RPC 目前寫死 limit 50,而且不會說「還有更多」(#110)。在那張票修好之前,剛好
+  // 回滿 50 就當成「可能被截斷」講出來——一句誠實的「50 張」比一句沉默的截斷難不了多少,
+  // 但它至少讓人知道要去 Studio 看。
+  say('ordersOut', orders.length === 50
+    ? '50 張(這是這支查詢的上限,可能還有沒顯示出來的——見 #110)'
+    : orders.length + ' 張');
   for (const order of orders) {
     $('ordersList').appendChild(orderCard(order));
   }
@@ -302,14 +381,119 @@ function orderCard(order) {
   });
   acts.appendChild(copy);
 
-  const done = document.createElement('button');
-  done.type = 'button';
-  done.textContent = '已在點點印下單';
-  done.addEventListener('click', () => void advance(order.id, 'submitted', done));
-  acts.appendChild(done);
+  // 往前推一格的按鈕:每一格各自不同,最後兩格沒有動作(#99)。
+  const NEXT = { paid: ['submitted', '已在點點印下單'], submitted: ['shipped', '已出貨'] };
+  const next = NEXT[order.state];
+  if (next) {
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.textContent = next[1];
+    done.addEventListener('click', () => void advance(order.id, next[0], done));
+    acts.appendChild(done);
+  }
 
   card.appendChild(acts);
+
+  // 要洗哪幾張(#100)。預設收起來:一張單十幾二十張縮圖,四張單就把清單淹了,而多數時候
+  // 要看的是收件資料。展開才去簽網址——presigned URL 是有效期的,不該在載入清單時就先簽一批。
+  if (order.state === 'paid' || order.state === 'submitted' || order.state === 'shipped') {
+    card.appendChild(photosBlock(order));
+  }
+
+  // 出不了的單要提醒退款,因為系統裡沒有那條路(狀態機沒有 refunded 這一格)。
+  if (order.state === 'failed') {
+    const warn = document.createElement('div');
+    warn.className = 'out bad';
+    warn.textContent = '這張收了錢但做不出來。退款要去綠界後台辦,系統不會自己退。';
+    card.appendChild(warn);
+  }
+
   return card;
+}
+
+/**
+ * 「看要洗哪幾張」那一塊(#100)。
+ *
+ * 在這之前後台只印得出「12 張・NT$300」,而人工履行需要的正是**檔案本身**——管理員只能自己
+ * 進 Supabase Studio 下 SQL 把 photo_ids 撈出來、再一顆一顆去 R2 找。R2 桶是私有的,所以網址
+ * 要由伺服器簽:admin-print-photos 那支 Edge Function 驗完身分,問 SQL「這個管理員能不能拿
+ * 這張履行中的訂單的檔案」,才簽 presigned URL 回來。
+ *
+ * 縮圖點下去開的是**高畫質那一層**——貼進點點印的是那一份,縮圖只是拿來認人的。
+ */
+function photosBlock(order) {
+  const box = document.createElement('div');
+
+  const acts = document.createElement('div');
+  acts.className = 'acts';
+  const show = document.createElement('button');
+  show.type = 'button';
+  show.className = 'copy';
+  show.textContent = '看要洗哪幾張';
+  acts.appendChild(show);
+  box.appendChild(acts);
+
+  const out = document.createElement('div');
+  out.className = 'out';
+  box.appendChild(out);
+
+  const grid = document.createElement('div');
+  grid.className = 'photos';
+  box.appendChild(grid);
+
+  show.addEventListener('click', async () => {
+    show.disabled = true;
+    out.textContent = '簽網址中…';
+    out.className = 'out';
+    grid.innerHTML = '';
+
+    const { data, error } = await supabase.functions.invoke('admin-print-photos', {
+      body: { orderId: order.id },
+    });
+    if (error) {
+      show.disabled = false;
+      out.textContent = '拿不到照片:' + (error.message || String(error));
+      out.className = 'out bad';
+      return;
+    }
+    if (!data || !data.ok) {
+      show.disabled = false;
+      // reason 直接顯示。這幾種都是我們自己流程走錯(不是管理員做錯什麼),看得到原字串
+      // 比看到一句和善的廢話有用。
+      out.textContent = '拿不到照片:' + ((data && data.reason) || 'unknown');
+      out.className = 'out bad';
+      return;
+    }
+
+    const hours = Math.round(data.expiresInSeconds / 3600);
+    out.textContent = data.photos.length + ' 張,網址 ' + hours + ' 小時內有效。'
+      + '點縮圖開的是高畫質那一層,貼進點點印的就是它。';
+    for (const photo of data.photos) {
+      const figure = document.createElement('figure');
+
+      const link = document.createElement('a');
+      link.href = photo.full.url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+
+      const img = document.createElement('img');
+      img.src = photo.thumbnail.url;
+      img.loading = 'lazy';
+      img.alt = '第 ' + photo.ordinal + ' 張';
+      link.appendChild(img);
+      figure.appendChild(link);
+
+      const caption = document.createElement('figcaption');
+      caption.textContent = photo.quantity > 1 ? photo.quantity + ' 份' : '1 份';
+      figure.appendChild(caption);
+
+      grid.appendChild(figure);
+    }
+    show.textContent = '重新簽網址';
+    show.disabled = false;
+  });
+
+  return box;
 }
 
 /**
@@ -330,11 +514,12 @@ async function advance(orderId, to, button) {
   if (!outcome || !outcome.ok) {
     button.disabled = false;
     say('ordersOut', outcome && outcome.reason === 'bad-transition'
-      ? '這張單的狀態已經不是待處理了,重新整理看看。'
+      ? '這張單的狀態已經不是這一格了(別的分頁或別台裝置推過了),重新整理看看。'
       : '推不動這張單。', 'bad');
     return;
   }
-  // 推成功就整份重載:那張卡已經不屬於「待處理」了,留在畫面上只會讓人再點一次。
+  // 推成功就整份重載:那張卡已經不屬於現在這一格了,留在畫面上只會讓人再點一次。它會出現
+  // 在下一格——這正是分頁存在的理由,不然推完就等於消失(#99)。
   await loadOrders();
 }
 
