@@ -507,7 +507,10 @@ function photosBlock(order) {
       figure.appendChild(link);
 
       const caption = document.createElement('figcaption');
-      caption.textContent = photo.quantity > 1 ? photo.quantity + ' 份' : '1 份';
+      // 下架的照片仍然列在清單裡(張數不可以悄悄變少),但要標出來是哪一張(#117)。
+      // 沒有這一行的話,它只會表現成「有一個網址點下去抓不到東西」。
+      caption.textContent = (photo.quantity > 1 ? photo.quantity + ' 份' : '1 份')
+        + (photo.stillExists === false ? '・⚠️ 已下架,抓不到檔案' : '');
       figure.appendChild(caption);
 
       grid.appendChild(figure);
