@@ -317,27 +317,49 @@ function renderTabs() {
  * 東西**——收件人、電話、郵遞區號+地址、洗幾張——所以有一顆「複製收件資料」把它整段抓走,
  * 不必在小螢幕上逐欄選取;要洗哪幾張則按「看要洗哪幾張」展開(#100)。
  */
-async function loadOrders() {
+// 一次抓幾張。多要一筆是為了知道「後面還有沒有」——第 51 張之後永遠看不到、而畫面一直寫
+// 「50 張待處理」,是 #110 裡最痛的那一個:使用者付了錢、訂單卡在 paid、沒有人知道。
+const ORDERS_PAGE_SIZE = 200;
+let ordersShown = 0;
+
+async function loadOrders(append) {
   const tab = ORDER_TABS.find((t) => t.state === currentState);
   say('ordersOut', '載入中…');
-  $('ordersList').innerHTML = '';
+  if (!append) {
+    ordersShown = 0;
+    $('ordersList').innerHTML = '';
+  } else {
+    const older = $('ordersMore');
+    if (older) older.remove();
+  }
 
-  const { data, error } = await supabase.rpc('admin_print_orders', { p_state: currentState });
+  const { data, error } = await supabase.rpc('admin_print_orders', {
+    p_state: currentState,
+    p_limit: ORDERS_PAGE_SIZE + 1,
+    p_offset: ordersShown,
+  });
   if (error) { say('ordersOut', describeError(error), 'bad'); return; }
 
-  const orders = Array.isArray(data) ? data : [];
-  if (orders.length === 0) {
+  const rows = Array.isArray(data) ? data : [];
+  if (rows.length === 0 && ordersShown === 0) {
     say('ordersOut', tab.empty);
     return;
   }
-  // ⚠️ 這支 RPC 目前寫死 limit 50,而且不會說「還有更多」(#110)。在那張票修好之前,剛好
-  // 回滿 50 就當成「可能被截斷」講出來——一句誠實的「50 張」比一句沉默的截斷難不了多少,
-  // 但它至少讓人知道要去 Studio 看。
-  say('ordersOut', orders.length === 50
-    ? '50 張(這是這支查詢的上限,可能還有沒顯示出來的——見 #110)'
-    : orders.length + ' 張');
+  const hasMore = rows.length > ORDERS_PAGE_SIZE;
+  const orders = hasMore ? rows.slice(0, ORDERS_PAGE_SIZE) : rows;
   for (const order of orders) {
     $('ordersList').appendChild(orderCard(order));
+  }
+  ordersShown += orders.length;
+  say('ordersOut', hasMore ? ordersShown + ' 張(後面還有)' : ordersShown + ' 張');
+
+  if (hasMore) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.id = 'ordersMore';
+    more.textContent = '載入更多';
+    more.addEventListener('click', () => void loadOrders(true));
+    $('ordersList').appendChild(more);
   }
 }
 
