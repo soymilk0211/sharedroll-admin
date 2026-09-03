@@ -381,6 +381,19 @@ function orderCard(order) {
   title.textContent = count + '・NT$' + order.amount + '・' + (order.room_name || '');
   card.appendChild(title);
 
+  // 這張單要不要印拍攝日期(產品負責人 2026-09-03)。**要印的才顯示**:不印是預設,寫出來
+  // 只是噪音;而要印的那幾張是這一頁上唯一需要多做一件事的,所以它得跳出來。
+  //
+  // ⚠️ 下載到的原圖**不含日期**——雲端存檔一律是乾淨的(需求規格書 1.4),日期是匯出當下
+  // 在裝置上合成的。把它壓到要送印的檔案上的工具還沒做(#330),在那之前這一行是提醒,
+  // 不是「已經處理好了」。
+  if (order.with_date_stamp) {
+    const stamp = document.createElement('p');
+    stamp.className = 'out bad';
+    stamp.textContent = '⚠️ 這張單要在照片右下角印上拍攝日期 —— 下載到的原圖沒有日期,見 #330';
+    card.appendChild(stamp);
+  }
+
   const who = document.createElement('div');
   who.className = 'who';
   who.textContent = recipientBlock(order);
