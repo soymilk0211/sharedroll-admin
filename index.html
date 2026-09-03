@@ -164,6 +164,7 @@
     <label for="note">備註(給自己看的,例如「資工系迎新」)</label>
     <input id="note" type="text" autocapitalize="off">
     <button id="issueBtn" type="button">發一張</button>
+    <p class="muted">發出去就收不回:這一頁沒有作廢的路,發錯只能進 Supabase Studio 刪。</p>
     <div id="issueOut" class="out"></div>
   </section>
 
@@ -559,14 +560,17 @@ function orderCard(order) {
   acts.appendChild(copy);
 
   // 往前推一格的按鈕:每一格各自不同,最後兩格沒有動作(#99)。
+  //
+  // **兩顆都要按兩次**(#142)。它們就躺在「複製收件資料」旁邊,同一排、一樣寬、一樣的顏色,
+  // 而按下去**回不來**:手滑把一張還沒寄出的單標成「已出貨」,使用者的 App 立刻就這樣寫,
+  // 要救回來只能進 Studio 用 postgres 身分下 SQL。在手機上處理訂單時尤其容易誤觸。
+  // (資料庫那個「只能往前」的設計是對的,不動它——要補的是這一側沒有確認。)
   const NEXT = { paid: ['submitted', '已在點點印下單'], submitted: ['shipped', '已出貨'] };
   const next = NEXT[order.state];
   if (next) {
-    const done = document.createElement('button');
-    done.type = 'button';
-    done.textContent = next[1];
-    done.addEventListener('click', () => void advance(order.id, next[0], done));
-    acts.appendChild(done);
+    acts.appendChild(armedButton(next[1], '這一步回不來,再按一次', (button) => {
+      void advance(order.id, next[0], button);
+    }));
   }
 
   card.appendChild(acts);
@@ -694,11 +698,29 @@ function paymentProblemBlock(order) {
 function refundButton(order) {
   const row = document.createElement('div');
   row.className = 'acts';
+  const button = armedButton('已退款', '確定退過了?再按一次', (self) => {
+    void advance(order.id, 'refunded', self);
+  });
+  button.className = 'danger';
+  row.appendChild(button);
+  return row;
+}
 
-  const label = '已退款';
+/**
+ * 一顆要按兩次才送出的按鈕(#142、#143、#326)。
+ *
+ * 這一頁上每一顆「回不來」的動作都用它:推訂單狀態、發兌換碼、記退款。第一下只是舉手,
+ * 五秒沒有第二下就自己放下——所以誤觸的代價是看到一行字,不是一張改不回來的單。
+ *
+ * **不用 `confirm()`**:那個對話框在有些瀏覽器裡被擋掉,而擋掉的時候它會直接回 false,
+ * 於是按鈕變成永遠按不動,畫面上還看不出為什麼。
+ *
+ * 送出之前先把狀態解除:動作失敗時這一顆會留在畫面上(例如另一個分頁已經把那張單推過了),
+ * 而它不該還舉著「再按一次」——那時候按下去等於沒有第二道關。
+ */
+function armedButton(label, armedLabel, run) {
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'danger';
   button.textContent = label;
 
   let armed = false;
@@ -706,20 +728,16 @@ function refundButton(order) {
   button.addEventListener('click', () => {
     if (!armed) {
       armed = true;
-      button.textContent = '確定退過了?再按一次';
+      button.textContent = armedLabel;
       disarm = setTimeout(() => { armed = false; button.textContent = label; }, 5000);
       return;
     }
-    // 先解除再送出:推不動的時候(例如另一個分頁已經把它推到 submitted)這一顆會留在畫面上,
-    // 而它不該還舉著「再按一次」——那時候按下去等於沒有第二道關。
     clearTimeout(disarm);
     armed = false;
     button.textContent = label;
-    void advance(order.id, 'refunded', button);
+    run(button);
   });
-
-  row.appendChild(button);
-  return row;
+  return button;
 }
 
 /**
@@ -741,6 +759,7 @@ const PHOTO_REASONS = {
   'order-has-no-photos': '這張單裡一張照片都沒有。這不該發生,把單號記下來。',
   'photo-not-in-order': '這一張不屬於這張單,重新整理訂單列表再試一次。',
   'photo-taken-down': '這一張已經被檢舉下架了,不能再印。整張單要不要照樣出,自己判斷。',
+  'photos-truncated': '這張單的照片沒有全部拿到,所以一張都不給——照著洗會少印。把單號記下來。',
   'photo-file-missing': '這一張的檔案在儲存空間裡找不到,多半是已經被下架了。',
   'bad-request': '送出去的單號格式不對。這是後台自己的問題,把單號記下來。',
   'method-not-allowed': '這一頁用錯了請求方法。這是後台自己的問題。',
@@ -1025,9 +1044,29 @@ $('reloadOrders').addEventListener('click', () => void loadOrders());
 
 // 發兌換碼 ---------------------------------------------------------------------
 
+/**
+ * 多打一個 0 就發出 7200 張(#143)。
+ *
+ * 資料庫只擋 `<= 0`,而且它的註解明講「不設上限」——那是刻意的,因為「合理的張數」是營運
+ * 判斷不是資料規則。但那也代表這一側是唯一的關卡,而輸入框裡多一個字元不會有任何徵兆。
+ *
+ * 取 500:最大的一卷是 72 張,而辦活動包一整批也不會單張破五百。超過就要按兩次,而且那一下
+ * 要把數字唸出來——確認一個沒有數字的「你確定嗎」等於沒有確認。
+ */
+const CODE_GRANTS_CONFIRM_ABOVE = 500;
+let issueArmedFor = null;
+
 $('issueBtn').addEventListener('click', async () => {
   const grants = Number($('grants').value);
   if (!Number.isInteger(grants) || grants <= 0) { say('issueOut', '張數要是大於 0 的整數。', 'bad'); return; }
+
+  if (grants > CODE_GRANTS_CONFIRM_ABOVE && issueArmedFor !== grants) {
+    issueArmedFor = grants;
+    say('issueOut', grants + ' 張是不是多打了一個 0?確定的話再按一次「發一張」。'
+      + '發出去就收不回,這一頁沒有作廢的路。', 'bad');
+    return;
+  }
+  issueArmedFor = null;
 
   $('issueBtn').disabled = true;
   say('issueOut', '發碼中…');
