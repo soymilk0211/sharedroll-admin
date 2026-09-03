@@ -180,11 +180,29 @@ const supabase = createClient(SUPABASE_URL, PUBLISHABLE_KEY);
 const $ = (id) => document.getElementById(id);
 
 /** 把一句話寫進某個輸出區。tone 是 'ok'、'bad' 或空白。 */
-function say(id, text, tone = '') {
-  const node = $(id);
+function write(node, text, tone = '') {
   node.textContent = text;
   node.className = 'out ' + tone;
 }
+
+/** 同上,但用 id 找。訂單卡片裡的輸出區是動態長出來的、沒有 id,那邊直接用 write。 */
+function say(id, text, tone = '') {
+  write($(id), text, tone);
+}
+
+/**
+ * 「請求根本沒送出去」在各層客戶端與各家瀏覽器的說法(#325)。
+ *
+ * 這幾句話都**不是**在講伺服器回了什麼——是 fetch 自己沒完成。登入過期會長成這副樣子:
+ * 沒有授權標頭的請求被 Supabase 的閘道擋在函式之前,而閘道那個錯誤回應沒有 CORS 標頭,
+ * 於是瀏覽器只能把它算成連線失敗。真的斷網也長一模一樣,所以話要把兩種都說出來。
+ */
+const TRANSPORT_FAILURE = /Failed to fetch|Failed to send a request|NetworkError|Load failed/i;
+const TRANSPORT_TEXT =
+  '請求送不出去。可能是網路不通,也可能是登入過期了——重新整理這一頁、重新登入一次再試。';
+
+/** 登入不在了的時候,每一顆按鈕都說同一句話。 */
+const SESSION_GONE = '登入過期了。登入畫面已經放回這一頁最上面,用 Google 登入一次再回來按。';
 
 /**
  * 把 RPC 的錯誤翻成一句人話。
@@ -196,7 +214,37 @@ function describeError(error) {
   const raw = (error && (error.message || String(error))) || '';
   if (raw.includes('not-admin')) return '這個帳號不在管理員名單上。';
   if (raw.includes('invalid-total')) return '張數要是大於 0 的整數。';
+  if (TRANSPORT_FAILURE.test(raw)) return TRANSPORT_TEXT;
   return '出了點問題:' + raw;
+}
+
+/**
+ * 把登入畫面放回來。
+ *
+ * 登入成功之後 `refresh()` 就把整段 `gate` 藏起來了,所以在「請重新登入」的那一刻,畫面上
+ * 其實一顆登得了的按鈕都沒有——只講一句話等於叫人去按一個看不到的東西。順便捲上去,不然
+ * 他人在訂單卡片那邊,那顆按鈕在螢幕外。
+ */
+function reopenGate() {
+  $('gate').hidden = false;
+  $('gate').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/**
+ * 送出任何「以我的身分」的請求之前,先確認登入還在(#325)。
+ *
+ * 不擋的話,登入過期表現出來的是一句指不到原因的話:2026-09-03 按「看要洗哪幾張」得到的是
+ * `Failed to send a request to the Edge Function`,而那一頁上的訂單列表照常顯示(那是登入
+ * 還在的時候載進來的),所以完全看不出是登入的問題,只看得出「好像壞了」。
+ *
+ * 回 false 的時候,這個函式已經把話寫進 out、也把登入畫面放回來了,呼叫端直接收工就好。
+ */
+async function requireSession(out) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) return true;
+  reopenGate();
+  write(out, SESSION_GONE, 'bad');
+  return false;
 }
 
 /** 登入之後問「我是誰」,據此決定這一頁長什麼樣。 */
@@ -323,6 +371,9 @@ const ORDERS_PAGE_SIZE = 200;
 let ordersShown = 0;
 
 async function loadOrders(append) {
+  // 擋在清空列表之前:登入過期的時候,畫面上那份(登入還在時載進來的)清單留著比清掉有用。
+  if (!(await requireSession($('ordersOut')))) return;
+
   const tab = ORDER_TABS.find((t) => t.state === currentState);
   say('ordersOut', '載入中…');
   if (!append) {
@@ -449,6 +500,72 @@ function orderCard(order) {
 }
 
 /**
+ * `admin-print-photos` 回得出來的每一種 reason,對應一句人話(#325)。
+ *
+ * 這張表三個地方共用:函式用 200 回的「被拒」、用 4xx/5xx 回的錯誤、以及要位元組那一條路。
+ * 沒有它的時候,畫面上長出來的是 `not-authenticated` 這種只有寫的人看得懂的字;而 4xx/5xx
+ * 那一種更糟——supabase-js 對所有非 2xx 的回應**一律**只說一句 `Edge Function returned a
+ * non-2xx status code`,於是「登入過期」「照片被下架」「金鑰沒設齊」在畫面上一模一樣。
+ *
+ * 這幾個字串要跟著 supabase/functions/admin-print-photos/index.ts 與它叫的那支 SQL 走;
+ * 少了哪一個,test/print/admin-print-photos-reasons.test.ts 會紅。
+ */
+const PHOTO_REASONS = {
+  'not-authenticated': SESSION_GONE,
+  'not-admin': '這個帳號不在管理員名單上。',
+  'order-not-found': '查無這張單,重新整理訂單列表看看。',
+  'order-not-fulfilling': '這張單現在的狀態不該拿照片(還沒付款、或已經取消了)。',
+  'order-has-no-photos': '這張單裡一張照片都沒有。這不該發生,把單號記下來。',
+  'photo-not-in-order': '這一張不屬於這張單,重新整理訂單列表再試一次。',
+  'photo-file-missing': '這一張的檔案在儲存空間裡找不到,多半是已經被下架了。',
+  'bad-request': '送出去的單號格式不對。這是後台自己的問題,把單號記下來。',
+  'method-not-allowed': '這一頁用錯了請求方法。這是後台自己的問題。',
+  'server-misconfigured': '伺服器上少了儲存空間的金鑰,那支函式跑不起來。',
+  'grant-error': '資料庫那一步失敗了。稍後再試;一直這樣就要去看那支函式的紀錄。',
+};
+
+/**
+ * reason 翻成人話。認不得的原字串照樣顯示——那比一句和善的廢話有用。
+ */
+function photoReasonText(reason) {
+  return PHOTO_REASONS[reason] ?? ('拿不到照片:' + (reason || 'unknown'));
+}
+
+/**
+ * 把函式回的 reason 從錯誤裡挖出來。挖不到(例如請求根本沒送出去)回 null。
+ *
+ * supabase-js 對非 2xx 只丟一句制式的英文,函式自己寫在 body 裡的 reason 收在 `error.context`
+ * ——那是原封不動的 Response。clone 過再讀,免得動到別人可能還要用的 body。
+ */
+async function reasonInResponse(error) {
+  const response = error && error.context;
+  if (!response || typeof response.clone !== 'function') return null;
+  try {
+    const body = await response.clone().json();
+    return (body && typeof body.reason === 'string') ? body.reason : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 呼叫 `admin-print-photos` 失敗時,該顯示的那一句話。
+ *
+ * 順手做一件事:原因是登入過期的話,把登入畫面放回來——這一種是唯一「他馬上做得了什麼」的
+ * 失敗,而做得了的那件事需要一顆看得見的按鈕。
+ */
+async function photoFailureText(error) {
+  const reason = await reasonInResponse(error);
+  if (reason) {
+    if (reason === 'not-authenticated') reopenGate();
+    return photoReasonText(reason);
+  }
+  const raw = (error && (error.message || String(error))) || '';
+  if (TRANSPORT_FAILURE.test(raw)) return TRANSPORT_TEXT;
+  return '拿不到照片:' + raw;
+}
+
+/**
  * 「看要洗哪幾張」那一塊(#100)。
  *
  * 在這之前後台只印得出「12 張・NT$300」,而人工履行需要的正是**檔案本身**——管理員只能自己
@@ -480,25 +597,22 @@ function photosBlock(order) {
 
   show.addEventListener('click', async () => {
     show.disabled = true;
-    out.textContent = '簽網址中…';
-    out.className = 'out';
+    write(out, '簽網址中…');
     grid.innerHTML = '';
+
+    if (!(await requireSession(out))) { show.disabled = false; return; }
 
     const { data, error } = await supabase.functions.invoke('admin-print-photos', {
       body: { orderId: order.id },
     });
     if (error) {
       show.disabled = false;
-      out.textContent = '拿不到照片:' + (error.message || String(error));
-      out.className = 'out bad';
+      write(out, await photoFailureText(error), 'bad');
       return;
     }
     if (!data || !data.ok) {
       show.disabled = false;
-      // reason 直接顯示。這幾種都是我們自己流程走錯(不是管理員做錯什麼),看得到原字串
-      // 比看到一句和善的廢話有用。
-      out.textContent = '拿不到照片:' + ((data && data.reason) || 'unknown');
-      out.className = 'out bad';
+      write(out, photoReasonText(data && data.reason), 'bad');
       return;
     }
 
@@ -536,7 +650,7 @@ function photosBlock(order) {
         stampButton.type = 'button';
         stampButton.textContent = '下載(含日期)';
         stampButton.addEventListener('click', () => {
-          void downloadWithDateStamp(stampButton, order.id, photo);
+          void downloadWithDateStamp(stampButton, out, order.id, photo);
         });
         figure.appendChild(stampButton);
       }
@@ -571,18 +685,21 @@ function photosBlock(order) {
  * 寬度為 1 的比例**,所以乘上 `canvas.width` 就得到與 App 匯出時一模一樣的位置與大小。
  * 這一頁不自己算幾何 —— 這個 repo 已經被「同一件事各寫一份」咬過兩次(#114、#118)。
  */
-async function downloadWithDateStamp(button, orderId, photo) {
+async function downloadWithDateStamp(button, out, orderId, photo) {
   const label = button.textContent;
   button.disabled = true;
   button.textContent = '合成中…';
   try {
+    if (!(await requireSession(out))) return;
+
     const { data, error } = await supabase.functions.invoke('admin-print-photos', {
       body: { orderId: orderId, photoId: photo.photoId },
     });
-    if (error) throw new Error(error.message || String(error));
+    if (error) throw new Error(await photoFailureText(error));
     // 回的是 JSON 就是被拒了(位元組那條路成功時回的是 image/*)。
-    if (!(data instanceof Blob) || data.type.indexOf('image/') !== 0) {
-      throw new Error('拿不到照片的檔案');
+    if (!(data instanceof Blob)) throw new Error(photoReasonText(data && data.reason));
+    if (data.type.indexOf('image/') !== 0) {
+      throw new Error('拿回來的不是圖檔(' + (data.type || '沒有型別') + ')。');
     }
 
     const bitmap = await createImageBitmap(data);
@@ -624,8 +741,10 @@ async function downloadWithDateStamp(button, orderId, photo) {
     URL.revokeObjectURL(url);
     button.textContent = '已下載';
   } catch (caught) {
-    // 直說。這一頁只有一個使用者,而他需要知道是哪一步壞了。
-    button.textContent = '失敗:' + (caught && caught.message ? caught.message : String(caught));
+    // 直說,而且寫在下面那塊輸出區裡:按鈕上的字兩秒後就被換回去了,一句完整的話讀不完
+    // ——而現在這裡的話是完整的一句(#325),不再是一串英文代碼。
+    button.textContent = '失敗';
+    write(out, (caught && caught.message) ? caught.message : String(caught), 'bad');
   } finally {
     button.disabled = false;
     // 兩秒後把字換回來,不然按過的那顆永遠寫著「已下載」。
@@ -641,6 +760,8 @@ async function downloadWithDateStamp(button, orderId, photo) {
  */
 async function advance(orderId, to, button) {
   button.disabled = true;
+  if (!(await requireSession($('ordersOut')))) { button.disabled = false; return; }
+
   const { data, error } = await supabase.rpc('admin_advance_print_order', {
     p_order_id: orderId,
     p_to: to,
@@ -670,6 +791,8 @@ $('issueBtn').addEventListener('click', async () => {
 
   $('issueBtn').disabled = true;
   say('issueOut', '發碼中…');
+  if (!(await requireSession($('issueOut')))) { $('issueBtn').disabled = false; return; }
+
   const { data, error } = await supabase.rpc('admin_issue_code', {
     p_grants_total_photos: grants,
     p_note: $('note').value,
@@ -704,6 +827,7 @@ $('findBtn').addEventListener('click', async () => {
   $('setBox').hidden = true;
   say('setOut', '');
   say('findOut', '查詢中…');
+  if (!(await requireSession($('findOut')))) return;
 
   const { data, error } = await supabase.rpc('admin_room_by_code', { p_code: $('roomCode').value });
   if (error) { say('findOut', describeError(error), 'bad'); return; }
@@ -730,6 +854,8 @@ $('setBtn').addEventListener('click', async () => {
 
   $('setBtn').disabled = true;
   say('setOut', '改中…');
+  if (!(await requireSession($('setOut')))) { $('setBtn').disabled = false; return; }
+
   const { data, error } = await supabase.rpc('admin_set_room_photos', {
     p_room_id: $('setBtn').dataset.roomId,
     p_total: total,
