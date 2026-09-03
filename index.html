@@ -480,48 +480,31 @@ function orderCard(order) {
   });
   acts.appendChild(copy);
 
-  // 推到下一格的按鈕:每一格各自不同(#99、#326)。一格可以有不只一顆——待處理的單既可以
-  // 往前推,也可以退款。已出貨與已退款那兩格是終點,沒有動作。
-  //
-  // 「已退款」為什麼只在待處理與出不了兩格出現:submitted 那一刻照片已經拿去印了,那時候
-  // 退款是純虧(產品負責人 2026-09-03 拍板)。這裡不畫是禮貌,資料庫那一側也擋著。
-  const ACTIONS = {
-    paid: [['submitted', '已在點點印下單'], ['refunded', '已退款']],
-    submitted: [['shipped', '已出貨']],
-    failed: [['refunded', '已退款']],
-  };
-  for (const [to, label] of ACTIONS[order.state] ?? []) {
+  // 往前推一格的按鈕:每一格各自不同,最後兩格沒有動作(#99)。
+  const NEXT = { paid: ['submitted', '已在點點印下單'], submitted: ['shipped', '已出貨'] };
+  const next = NEXT[order.state];
+  if (next) {
     const done = document.createElement('button');
     done.type = 'button';
-    done.textContent = label;
-    if (to === 'refunded') {
-      done.className = 'danger';
-      // **只有這一顆要按兩次。** 其他幾顆按錯的代價是「去做那件事」;這一顆按錯的代價是
-      // 使用者的 App 上寫著「已退款」而錢根本沒動,而且推不回來(狀態機只能往前,要進
-      // Studio 以 postgres 身分改)。它就貼在「已在點點印下單」旁邊,手指滑一格就是它。
-      let armed = false;
-      let disarm = null;
-      done.addEventListener('click', () => {
-        if (!armed) {
-          armed = true;
-          done.textContent = '確定退過了?再按一次';
-          disarm = setTimeout(() => { armed = false; done.textContent = label; }, 5000);
-          return;
-        }
-        // 先解除再送出:推不動的時候(例如另一個分頁已經把它推到 submitted)這一顆會留在
-        // 畫面上,而它不該還舉著「再按一次」——那時候按下去等於沒有第二道關。
-        clearTimeout(disarm);
-        armed = false;
-        done.textContent = label;
-        void advance(order.id, to, done);
-      });
-    } else {
-      done.addEventListener('click', () => void advance(order.id, to, done));
-    }
+    done.textContent = next[1];
+    done.addEventListener('click', () => void advance(order.id, next[0], done));
     acts.appendChild(done);
   }
 
   card.appendChild(acts);
+
+  // 「已退款」自己一排(#326),不跟上面那兩顆並排。
+  //
+  // 兩個理由。一是**它跟旁邊那顆不是同一種動作**:往前推按錯了,代價是「那就去做那件事」;
+  // 這一顆按錯,代價是使用者的 App 上寫著「已退款」而錢根本沒動,而且推不回來(狀態機只能
+  // 往前,要進 Studio 以 postgres 身分改)。二是三顆擠在 375 寬的手機上,「已在點點印下單」
+  // 會被壓成三行。
+  //
+  // 只有待處理與出不了兩格有:submitted 那一刻照片已經拿去印了,那時候退款是純虧
+  // (產品負責人 2026-09-03 拍板)。這裡不畫是禮貌,資料庫那一側也擋著。
+  if (order.state === 'paid' || order.state === 'failed') {
+    card.appendChild(refundButton(order));
+  }
 
   // 要洗哪幾張(#100)。預設收起來:一張單十幾二十張縮圖,四張單就把清單淹了,而多數時候
   // 要看的是收件資料。展開才去簽網址——presigned URL 是有效期的,不該在載入清單時就先簽一批。
@@ -550,6 +533,48 @@ function orderCard(order) {
   }
 
   return card;
+}
+
+/**
+ * 「已退款」那一顆(#326)。
+ *
+ * **這一頁上唯一要按兩次的按鈕。** 其他每一顆按錯的代價都是「那就去做那件事」;這一顆按錯,
+ * 使用者的 App 上就寫著「已退款」而錢根本沒動,而且推不回來。第一下只是舉手,五秒沒有第二下
+ * 就自己放下——不用 confirm():那個對話框在有些瀏覽器裡被擋掉,擋掉的時候它會直接回 false,
+ * 於是這顆按鈕變成永遠按不動,而畫面上看不出為什麼。
+ *
+ * 錢**不是**這顆按的:第一版是人工退刷,人去綠界後台按退刷,這裡只負責記帳。所以字寫的是
+ * 「已退款」(過去式)而不是「退款」。
+ */
+function refundButton(order) {
+  const row = document.createElement('div');
+  row.className = 'acts';
+
+  const label = '已退款';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'danger';
+  button.textContent = label;
+
+  let armed = false;
+  let disarm = null;
+  button.addEventListener('click', () => {
+    if (!armed) {
+      armed = true;
+      button.textContent = '確定退過了?再按一次';
+      disarm = setTimeout(() => { armed = false; button.textContent = label; }, 5000);
+      return;
+    }
+    // 先解除再送出:推不動的時候(例如另一個分頁已經把它推到 submitted)這一顆會留在畫面上,
+    // 而它不該還舉著「再按一次」——那時候按下去等於沒有第二道關。
+    clearTimeout(disarm);
+    armed = false;
+    button.textContent = label;
+    void advance(order.id, 'refunded', button);
+  });
+
+  row.appendChild(button);
+  return row;
 }
 
 /**
