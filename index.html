@@ -502,6 +502,16 @@ function orderCard(order) {
   //
   // 只有待處理與出不了兩格有:submitted 那一刻照片已經拿去印了,那時候退款是純虧
   // (產品負責人 2026-09-03 拍板)。這裡不畫是禮貌,資料庫那一側也擋著。
+  //
+  // 出不了的那一格,把「一定要退、而且順序是先綠界後這裡」寫在按鈕**上面**:那句話是要在
+  // 按下去之前讀的。按了這裡卻沒去綠界的話,使用者看到「已退款」而錢沒回去。
+  if (order.state === 'failed') {
+    const warn = document.createElement('div');
+    warn.className = 'out bad';
+    warn.textContent = '這張收了錢但做不出來,一定要退款。'
+      + '先去綠界後台按退刷,錢真的退出去之後,再回來按下面那顆記帳。';
+    card.appendChild(warn);
+  }
   if (order.state === 'paid' || order.state === 'failed') {
     card.appendChild(refundButton(order));
   }
@@ -510,17 +520,6 @@ function orderCard(order) {
   // 要看的是收件資料。展開才去簽網址——presigned URL 是有效期的,不該在載入清單時就先簽一批。
   if (order.state === 'paid' || order.state === 'submitted' || order.state === 'shipped') {
     card.appendChild(photosBlock(order));
-  }
-
-  // 出不了的單要提醒退款。第一版是人工退刷(#326):錢由人去綠界後台按,這一頁上那顆
-  // 「已退款」只負責記帳——所以順序講清楚,不然按了這裡卻沒去綠界,使用者看到「已退款」
-  // 而錢沒回去。
-  if (order.state === 'failed') {
-    const warn = document.createElement('div');
-    warn.className = 'out bad';
-    warn.textContent = '這張收了錢但做不出來,一定要退款。'
-      + '先去綠界後台按退刷,錢真的退出去之後,再回來按上面的「已退款」記帳。';
-    card.appendChild(warn);
   }
 
   // 已退款的單:講清楚使用者那一側現在看到什麼,免得又被問一次。
