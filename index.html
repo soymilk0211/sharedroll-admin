@@ -525,14 +525,14 @@ function orderCard(order) {
   // 這張單要不要印拍攝日期(產品負責人 2026-09-03)。**要印的才顯示**:不印是預設,寫出來
   // 只是噪音;而要印的那幾張是這一頁上唯一需要多做一件事的,所以它得跳出來。
   //
-  // ⚠️ 下載到的原圖**不含日期**——雲端存檔一律是乾淨的(需求規格書 1.4),日期是匯出當下
-  // 在裝置上合成的。把它壓到要送印的檔案上的工具還沒做(#330),在那之前這一行是提醒,
-  // 不是「已經處理好了」。
+  // ⚠️ 雲端存檔的原圖**不含日期**——那是乾淨的(需求規格書 1.4),日期是匯出當下在裝置上
+  // 合成的。「打包整單」會在存檔前把日期畫上去,所以走那條路的人不必自己分辨哪張要印;
+  // 這一行留著是因為**點縮圖直接存下來的那一份沒有日期**,而縮圖就在下面那一區。
   if (order.with_date_stamp) {
     const stamp = document.createElement('p');
     stamp.className = 'out';
-    stamp.textContent = '這張單要在照片右下角印上拍攝日期 —— 展開下面那一區,用每一張的'
-      + '「下載(含日期)」存檔,不要直接點縮圖(R2 上存的是沒有日期的原圖)。';
+    stamp.textContent = '這張單要在照片右下角印上拍攝日期 —— 用「打包整單」存,日期會直接'
+      + '合成在檔案上。不要點縮圖另存(R2 上存的是沒有日期的原圖)。';
     card.appendChild(stamp);
   }
 
@@ -816,7 +816,9 @@ async function photoFailureText(error) {
  * 要由伺服器簽:admin-print-photos 那支 Edge Function 驗完身分,問 SQL「這個管理員能不能拿
  * 這張履行中的訂單的檔案」,才簽 presigned URL 回來。
  *
- * 縮圖點下去開的是**高畫質那一層**——貼進點點印的是那一份,縮圖只是拿來認人的。
+ * 縮圖點下去開的是**高畫質那一層**,但那只是拿來認人的。真正要送印的檔案走「打包整單」
+ * ({@link packOrder}):它會把份數展開成一張一張的檔案、把要印的日期合成上去,而點縮圖
+ * 另存拿到的是沒有日期的原圖。
  */
 function photosBlock(order) {
   const box = document.createElement('div');
@@ -833,6 +835,15 @@ function photosBlock(order) {
   const out = document.createElement('div');
   out.className = 'out';
   box.appendChild(out);
+
+  // 「打包整單」自己去要清單,不必先按「看要洗哪幾張」。要送印的時候他只想拿到檔案,
+  // 而「先展開、再打包」是一次沒有意義的第二個點擊。
+  const pack = document.createElement('button');
+  pack.type = 'button';
+  pack.className = 'copy';
+  pack.textContent = '打包整單';
+  pack.addEventListener('click', () => { void packOrder(pack, out, order); });
+  acts.appendChild(pack);
 
   const grid = document.createElement('div');
   grid.className = 'photos';
@@ -861,7 +872,7 @@ function photosBlock(order) {
 
     const hours = Math.round(data.expiresInSeconds / 3600);
     out.textContent = data.photos.length + ' 張,網址 ' + hours + ' 小時內有效。'
-      + '點縮圖開的是高畫質那一層,貼進點點印的就是它。';
+      + '點縮圖開的是高畫質那一層,用來認人的;要送印按上面那顆「打包整單」。';
     for (const photo of data.photos) {
       const figure = document.createElement('figure');
 
@@ -917,25 +928,81 @@ function photosBlock(order) {
 }
 
 /**
- * 把日期畫上去,存成一個檔案(#330)。
+ * 跟 `admin-print-photos` 要一張照片的位元組。
  *
- * ## 為什麼是這一頁在畫,而不是伺服器
+ * ## 為什麼不直接抓 `photo.full.url`
+ *
+ * 那是 R2 的 presigned URL,**沒有 CORS 標頭**:`fetch` 讀不到它的內容,而把它畫進 canvas
+ * 會讓 canvas 被「污染」、`toBlob` 直接拋例外。我們自己這一支的 CORS 是我們設的,所以拿
+ * 位元組一律走它——不管那張要不要印日期。
+ */
+async function printPhotoBytes(orderId, photoId) {
+  const { data, error } = await supabase.functions.invoke('admin-print-photos', {
+    body: { orderId: orderId, photoId: photoId },
+  });
+  if (error) throw new Error(await photoFailureText(error));
+  // 回的是 JSON 就是被拒了(位元組那條路成功時回的是 image/*)。
+  if (!(data instanceof Blob)) throw new Error(photoReasonText(data && data.reason));
+  if (data.type.indexOf('image/') !== 0) {
+    throw new Error('拿回來的不是圖檔(' + (data.type || '沒有型別') + ')。');
+  }
+  return data;
+}
+
+/**
+ * 把拍攝日期畫到照片右下角,回一份新的 JPEG。`stamp` 是空的就原樣回去。
+ *
+ * ## 為什麼要有人補這個日期
  *
  * R2 上存的照片**一律不含日期**(需求規格書 1.4)——日期是「存進相簿」的當下在手機上合成的。
- * 送印這條路上沒有手機在現場,所以要有人補上。放在瀏覽器裡畫的理由是:這一頁本來就要把
- * 那張圖載下來給人看,而 canvas 沒有伺服器那邊的記憶體與時間限制。
- *
- * ## 為什麼位元組要繞一手
- *
- * 圖不是從 R2 的 presigned URL 直接抓的,是跟 `admin-print-photos` 要的。canvas 一旦畫進一張
- * 跨網域、沒有 CORS 標頭的圖就會被「污染」,`toBlob` 會直接拋例外,而 R2 的 presigned URL
- * 預設不帶那個標頭。我們自己那一支的 CORS 是我們設的。
+ * 送印這條路上沒有手機在現場,所以要在這裡補。放在瀏覽器裡畫的理由是:這一頁本來就要把那張圖
+ * 載下來,而 canvas 沒有伺服器那邊的記憶體與時間限制。
  *
  * ## 那組數字的形狀不在這裡
  *
  * 多邊形是伺服器算好交過來的(`_shared/date-stamp.ts`),這裡只負責照著填。座標是**以照片
  * 寬度為 1 的比例**,所以乘上 `canvas.width` 就得到與 App 匯出時一模一樣的位置與大小。
  * 這一頁不自己算幾何 —— 這個 repo 已經被「同一件事各寫一份」咬過兩次(#114、#118)。
+ */
+async function stampOnto(blob, stamp) {
+  if (!stamp) return blob;
+
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+
+  // 整組數字推到右下角。座標是比例,一律乘 canvas.width —— 連垂直方向也是,因為 App 那一份
+  // 的每一個尺寸都是由**寬度**推導的(見 export/date-stamp.ts 的檔頭)。
+  const scale = canvas.width;
+  const originX = canvas.width - stamp.right * scale - stamp.width * scale;
+  const originY = canvas.height - stamp.bottom * scale - stamp.height * scale;
+  ctx.fillStyle = stamp.color;
+  for (const segment of stamp.segments) {
+    ctx.beginPath();
+    for (const [index, point] of segment.entries()) {
+      const x = originX + point[0] * scale;
+      const y = originY + point[1] * scale;
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  const stamped = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.95));
+  if (!stamped) throw new Error('把日期畫上去之後存不出檔案');
+  return stamped;
+}
+
+/**
+ * 一張一張存(#330)。要印日期的那幾張才有這顆按鈕。
+ *
+ * 整單一次存走 {@link packOrder};這一顆留著是為了「只想重存其中一張」——補印、或者剛才那次
+ * 存壞了。位元組與日期都交給 {@link printPhotoBytes} 與 {@link stampOnto},兩條路共用同一份
+ * 邏輯:這個 repo 已經被「同一件事各寫一份」咬過兩次(#114、#118)。
  */
 async function downloadWithDateStamp(button, out, orderId, photo) {
   const label = button.textContent;
@@ -944,44 +1011,7 @@ async function downloadWithDateStamp(button, out, orderId, photo) {
   try {
     if (!(await requireSession(out))) return;
 
-    const { data, error } = await supabase.functions.invoke('admin-print-photos', {
-      body: { orderId: orderId, photoId: photo.photoId },
-    });
-    if (error) throw new Error(await photoFailureText(error));
-    // 回的是 JSON 就是被拒了(位元組那條路成功時回的是 image/*)。
-    if (!(data instanceof Blob)) throw new Error(photoReasonText(data && data.reason));
-    if (data.type.indexOf('image/') !== 0) {
-      throw new Error('拿回來的不是圖檔(' + (data.type || '沒有型別') + ')。');
-    }
-
-    const bitmap = await createImageBitmap(data);
-    const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-
-    // 整組數字推到右下角。座標是比例,一律乘 canvas.width —— 連垂直方向也是,因為 App 那一份
-    // 的每一個尺寸都是由**寬度**推導的(見 export/date-stamp.ts 的檔頭)。
-    const scale = canvas.width;
-    const stamp = photo.dateStamp;
-    const originX = canvas.width - stamp.right * scale - stamp.width * scale;
-    const originY = canvas.height - stamp.bottom * scale - stamp.height * scale;
-    ctx.fillStyle = stamp.color;
-    for (const segment of stamp.segments) {
-      ctx.beginPath();
-      for (const [index, point] of segment.entries()) {
-        const x = originX + point[0] * scale;
-        const y = originY + point[1] * scale;
-        if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.95));
-    if (!blob) throw new Error('存不出檔案');
+    const blob = await stampOnto(await printPhotoBytes(orderId, photo.photoId), photo.dateStamp);
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -1000,6 +1030,152 @@ async function downloadWithDateStamp(button, out, orderId, photo) {
   } finally {
     button.disabled = false;
     // 兩秒後把字換回來,不然按過的那顆永遠寫著「已下載」。
+    setTimeout(() => { button.textContent = label; }, 2000);
+  }
+}
+
+/** 檔名/資料夾名裡不能有的字元換成 `-`。Windows 擋的那幾個,加上前後的空白與句點。 */
+function safeName(text) {
+  return String(text || '').replace(/[/:*?"<>|\\]/g, '-').replace(/^[\s.]+|[\s.]+$/g, '').slice(0, 60);
+}
+
+/** 這張單存出來的資料夾叫什麼。房間名認人、編號認單。 */
+function folderNameFor(order) {
+  const room = safeName(order.room_name);
+  return 'SharedRoll-' + (room ? room + '-' : '') + String(order.id).slice(0, 8);
+}
+
+/** 資料夾裡那份 `收件資訊.txt` 的內容。 */
+function recipientTextFor(order) {
+  // 換行一定要寫成兩個字元的 \n,不要在字串中間真的斷行(見 recipientBlock:那是語法錯誤,
+  // 而語法錯誤會讓整頁一行都不執行,不是只有這個函式壞掉)。
+  const lines = [
+    'SharedRoll 沖印單',
+    '訂單編號:' + order.id,
+    '房間:' + (order.room_name || '(沒有名字)'),
+    '張數:' + (order.prints === null ? '相片書' : order.prints + ' 張') + '・NT$' + order.amount,
+    '',
+    '收件資料(整段可以貼進沖印廠):',
+    recipientBlock(order),
+    '',
+  ];
+  if (order.with_date_stamp) {
+    lines.push('※ 這張單要印拍攝日期,資料夾裡的每一張都已經合成好了,直接上傳就是。');
+  }
+  return lines.join('\n');
+}
+
+/** 在資料夾裡寫一個文字檔(UTF-8)。 */
+async function writeTextFile(dir, name, text) {
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  // 前面加 BOM:這個檔會被 Windows 的記事本打開,沒有 BOM 的話中文會變亂碼。
+  // 寫成 fromCharCode 而不是一個字面上的 BOM 字元:那個字元是隱形的,擺在原始碼裡
+  // 看起來像個空字串,下一個人會把它當成沒用的東西刪掉。
+  const bom = String.fromCharCode(0xfeff);
+  await writable.write(new Blob([bom + text], { type: 'text/plain;charset=utf-8' }));
+  await writable.close();
+}
+
+/** 在資料夾裡寫一個檔案。 */
+async function writeBlobFile(dir, name, blob) {
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+/**
+ * 把一張單要洗的照片全部存進一個資料夾(#359)。
+ *
+ * ## 為什麼是資料夾,不是 zip
+ *
+ * 目的地是沖印廠的網頁上傳,那些頁面吃的是「一次選很多檔案」。存成資料夾就能直接全選拖進去;
+ * zip 還要先解一次,而解出來的東西正是這個資料夾。
+ *
+ * 用的是 File System Access API(`showDirectoryPicker`),Chrome 與 Edge 有,Safari 與 Firefox
+ * 沒有。這一頁只有我們自己在用、而且跑在 Windows 上,所以**不做退路**——不支援時直說要換
+ * 瀏覽器,比為了一個假想的使用者塞一個 zip 函式庫進來誠實。
+ *
+ * ## 檔名裡的份數
+ *
+ * 同一張要洗幾份就寫幾個檔:`03(1).jpg`、`03(2).jpg`、`03(3).jpg`。沖印廠的上傳頁是「一個檔案
+ * 一張照片」,份數只能用複製檔案表達;而編號**補零到兩位**,不然按檔名排序時 10 會跑到 2 前面。
+ *
+ * 同一張的多份共用同一份位元組,只寫幾次檔——不要為了第二份再抓一次圖。
+ *
+ * ## 已下架的照片會被跳過,而且要講出來
+ *
+ * 因為裸露或暴力被檢舉下架的照片(#297)伺服器不簽網址、也不給位元組,所以這裡拿不到它。
+ * 跳過之後**一定要在報告裡講**:他付的是 12 張的錢、資料夾裡卻只有 11 張,那是他必須知道
+ * 的事,不可以安靜地少一張。
+ */
+async function packOrder(button, out, order) {
+  const label = button.textContent;
+
+  if (typeof window.showDirectoryPicker !== 'function') {
+    write(out, '這個瀏覽器沒有「選一個資料夾來存」的能力(Safari 與 Firefox 都沒有)。用 Chrome 或 Edge 開這一頁。', 'bad');
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = '存檔中…';
+  try {
+    if (!(await requireSession(out))) return;
+
+    let parent;
+    try {
+      parent = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (caught) {
+      // 自己按取消不是錯誤,不要在畫面上留一句紅字。
+      if (caught && caught.name === 'AbortError') { write(out, '取消了,什麼都沒存。'); return; }
+      throw caught;
+    }
+
+    write(out, '要清單…');
+    const { data, error } = await supabase.functions.invoke('admin-print-photos', {
+      body: { orderId: order.id },
+    });
+    if (error) throw new Error(await photoFailureText(error));
+    if (!data || !data.ok) throw new Error(photoReasonText(data && data.reason));
+
+    // 照 ordinal 排序。拖進沖印廠之後的排列會照檔名,而檔名是照 ordinal 給的——兩邊一致,
+    // 他才對得上「第幾張是哪一張」。
+    const photos = data.photos.slice().sort((a, b) => a.ordinal - b.ordinal);
+    const folder = await parent.getDirectoryHandle(folderNameFor(order), { create: true });
+
+    // 收件資料先寫:它是唯一一個「照片之外」的東西,先寫好的話,就算照片抓到一半失敗,
+    // 地址已經在那裡了。
+    await writeTextFile(folder, '收件資訊.txt', recipientTextFor(order));
+
+    let written = 0;
+    const skipped = [];
+    for (const [index, photo] of photos.entries()) {
+      if (photo.stillExists === false) { skipped.push(photo.ordinal); continue; }
+
+      button.textContent = '第 ' + (index + 1) + '/' + photos.length + ' 張…';
+      const blob = await stampOnto(await printPhotoBytes(order.id, photo.photoId), photo.dateStamp);
+
+      const copies = Math.max(1, photo.quantity || 1);
+      const stem = String(photo.ordinal).padStart(2, '0');
+      for (let copy = 1; copy <= copies; copy += 1) {
+        await writeBlobFile(folder, stem + '(' + copy + ').jpg', blob);
+        written += 1;
+      }
+    }
+
+    let report = '存好了:' + folderNameFor(order) + ' 這個資料夾裡有 ' + written + ' 個檔案,加一份收件資訊。';
+    if (skipped.length) {
+      report += ' ⚠️ 跳過 ' + skipped.length + ' 張已下架的(第 ' + skipped.join('、') + ' 張)'
+        + '——那幾張印不出來,資料夾裡會比這張單付的張數少。';
+    }
+    write(out, report, skipped.length ? 'bad' : 'ok');
+    button.textContent = '已存好';
+  } catch (caught) {
+    button.textContent = '失敗';
+    write(out, (caught && caught.message) ? caught.message : String(caught), 'bad');
+  } finally {
+    button.disabled = false;
     setTimeout(() => { button.textContent = label; }, 2000);
   }
 }
