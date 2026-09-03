@@ -98,6 +98,12 @@
   .order .copy { border-color: var(--divider); }
   /* 「已退款」。同一排裡唯一不可逆、而且牽涉到錢的那一顆,顏色要跟旁邊分得開(#326)。 */
   .order .danger { border-color: var(--bad); color: var(--bad); }
+  /* 「收到錢卻入不了帳」的橫幅(#328)。整頁唯一填色的東西——它必須比周圍任何一顆按鈕先被看到。 */
+  .alert {
+    border-color: var(--bad); background: rgba(217, 138, 106, 0.14); color: var(--bad);
+    text-align: left; font-size: 15px; line-height: 1.5; margin-bottom: 12px;
+  }
+  .alert[aria-current="true"] { background: transparent; }
   /* 訂單狀態的分頁。目前這一格用實邊框,其餘用分隔線的顏色——同一排五顆,靠深淺分主次。 */
   .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
   .tabs button { margin: 0; padding: 9px 4px; font-size: 14px; min-height: 42px; border-color: var(--divider); }
@@ -133,6 +139,11 @@
 
   <section id="orders" hidden>
     <h2>訂單</h2>
+    <!--
+      「收到錢卻入不了帳」的橫幅(#328)。平常整段藏著——那是例外,不是一個日常分類,做成
+      第六格分頁的話它會永遠佔著位子、而且要有人想到去點。有事的時候它自己跳出來擋在最前面。
+    -->
+    <button id="ordersAlert" class="alert" type="button" hidden></button>
     <div class="tabs" id="orderTabs"></div>
     <p class="muted" id="ordersHint"></p>
     <button id="reloadOrders" type="button">重新整理</button>
@@ -348,7 +359,23 @@ const ORDER_TABS = [
   },
 ];
 
-let currentState = 'paid';
+/**
+ * 第六格,但它不在那一排裡(#328)。
+ *
+ * 「收到過一筆錢、卻入不了帳」是一個**事件**,不是一個狀態:那幾張多半停在 awaiting_payment,
+ * 而那一格絕大多數是還沒付款的正常單。做成第六格分頁的話它會永遠佔著位子(五格在 375 寬的
+ * 手機上剛好排滿),而且要有人想到去點——這件事的整個毛病就是「沒有人在看」。
+ *
+ * 所以它靠上面那條橫幅進來:有事的時候橫幅自己跳出來,沒事的時候整段不存在。
+ */
+const FLAGGED_TAB = {
+  flagged: true,
+  label: '收到錢卻入不了帳',
+  hint: '綠界回報過一筆錢,但我們入不了帳的單。先去綠界後台看那一筆,處理完再按卡片上的「處理好了」。',
+  empty: '沒有入不了帳的付款。',
+};
+
+let currentTab = ORDER_TABS[0];
 
 function renderTabs() {
   const tabs = $('orderTabs');
@@ -358,16 +385,48 @@ function renderTabs() {
     button.type = 'button';
     button.textContent = tab.label;
     // aria-current 同時是樣式的鉤子與給輔助技術的訊息,不另外加一個 class。
-    if (tab.state === currentState) button.setAttribute('aria-current', 'true');
+    if (tab === currentTab) button.setAttribute('aria-current', 'true');
     button.addEventListener('click', () => {
-      currentState = tab.state;
+      currentTab = tab;
       renderTabs();
       void loadOrders();
     });
     tabs.appendChild(button);
   }
-  $('ordersHint').textContent = ORDER_TABS.find((t) => t.state === currentState).hint;
+  // 看著「收到錢卻入不了帳」那一份清單時,那一排裡沒有任何一格是亮的——那時亮著的是橫幅。
+  $('ordersAlert').toggleAttribute('aria-current', currentTab === FLAGGED_TAB);
+  $('ordersHint').textContent = currentTab.hint;
 }
+
+/**
+ * 有沒有「收到錢卻入不了帳」的單,有的話把橫幅放出來(#328)。
+ *
+ * 每次載入清單時順手問一次。多一趟 RPC,換到的是「不必想到要去點才看得到」——而這件事的
+ * 整個毛病就是沒有人會想到。
+ *
+ * 安靜失敗:問不到就當作沒有。這是一個附加的提醒,它壞掉不該讓訂單清單也跟著壞掉;而真的
+ * 出事時,Slack 那一則已經先喊過了。**遷移還沒推上線的那一段時間走的就是這條**——伺服器還
+ * 不認得 p_flagged,回一句「找不到這個函式」,橫幅就不出現。
+ */
+async function refreshFlaggedBanner() {
+  const alert = $('ordersAlert');
+  const { data, error } = await supabase.rpc('admin_print_orders', {
+    p_flagged: true,
+    p_limit: 200,
+    p_offset: 0,
+  });
+  const rows = (!error && Array.isArray(data)) ? data : [];
+  alert.hidden = rows.length === 0;
+  if (rows.length > 0) {
+    alert.textContent = '⚠️ 有 ' + rows.length + ' 張收到錢卻入不了帳的單。點這裡看。';
+  }
+}
+
+$('ordersAlert').addEventListener('click', () => {
+  currentTab = FLAGGED_TAB;
+  renderTabs();
+  void loadOrders();
+});
 
 /**
  * 目前這一格的訂單。
@@ -385,7 +444,7 @@ async function loadOrders(append) {
   // 擋在清空列表之前:登入過期的時候,畫面上那份(登入還在時載進來的)清單留著比清掉有用。
   if (!(await requireSession($('ordersOut')))) return;
 
-  const tab = ORDER_TABS.find((t) => t.state === currentState);
+  const tab = currentTab;
   say('ordersOut', '載入中…');
   if (!append) {
     ordersShown = 0;
@@ -395,11 +454,24 @@ async function loadOrders(append) {
     if (older) older.remove();
   }
 
-  const { data, error } = await supabase.rpc('admin_print_orders', {
-    p_state: currentState,
+  // 橫幅跟著每一次載入重問(#328)。按過「處理好了」之後那個數字要立刻變,不然他會以為沒生效。
+  if (!append) void refreshFlaggedBanner();
+
+  // **平常那五格一個新參數都不送。**
+  //
+  // 這一頁住在另一個 repo 的 GitHub Pages 上,而它必須先複製過去、本機 `npm test` 才會綠
+  // ——所以線上這一頁**一定會比資料庫早一步**(#312 是同一種病的另一個方向)。多送一個伺服器
+  // 還不認得的參數,PostgREST 會回「找不到這個函式」,而那會讓**整份訂單清單**打不開,不是
+  // 只有新功能不能用。只在真的要查那一份時才送 p_flagged:遷移還沒推的時候,壞掉的頂多是
+  // 橫幅(它自己安靜失敗),日常那五格照舊。
+  const query = {
+    p_state: tab.state ?? 'paid',
     p_limit: ORDERS_PAGE_SIZE + 1,
     p_offset: ordersShown,
-  });
+  };
+  if (tab.flagged === true) query.p_flagged = true;
+
+  const { data, error } = await supabase.rpc('admin_print_orders', query);
   if (error) { say('ordersOut', describeError(error), 'bad'); return; }
 
   const rows = Array.isArray(data) ? data : [];
@@ -522,6 +594,12 @@ function orderCard(order) {
     card.appendChild(photosBlock(order));
   }
 
+  // 收到過一筆入不了帳的錢(#328)。這一塊擺在最後、也擺在最顯眼:它講的是**錢已經在戶頭裡
+  // 而系統認為這張單還沒付款**,比卡片上其他任何一行都重要。
+  if (order.payment_problem) {
+    card.appendChild(paymentProblemBlock(order));
+  }
+
   // 已退款的單:講清楚使用者那一側現在看到什麼,免得又被問一次。
   if (order.state === 'refunded') {
     const note = document.createElement('div');
@@ -532,6 +610,68 @@ function orderCard(order) {
   }
 
   return card;
+}
+
+/** 入不了帳的原因翻成一句人話(#328)。與 _shared/slack.ts 那一份是同一組字。 */
+const PAYMENT_PROBLEMS = {
+  'amount-mismatch': '付進來的金額跟這張單開的對不上',
+  'order-canceled': '錢進來的時候這張單已經作廢或做不出來了',
+  'order-not-found': '這個交易編號查無此單',
+};
+
+/**
+ * 「這張單收到過一筆入不了帳的錢」那一塊(#328)。
+ *
+ * 為什麼要一顆「處理好了」:錢的部分在綠界後台處理,而這一頁沒有辦法知道他處理完了沒。沒有
+ * 這顆的話,那張單會永遠留在橫幅的數字裡——一個永遠亮著的紅點等於沒有紅點,而且逾時作廢的
+ * 排程也永遠收不走它(那道跳過就是靠這個旗標)。
+ *
+ * 它**不動訂單狀態、也不動錢**,只是把這件事標成看過了。所以字寫的是「處理好了」而不是
+ * 「解決」——他要先真的去綠界處理。
+ */
+function paymentProblemBlock(order) {
+  const box = document.createElement('div');
+
+  const said = document.createElement('div');
+  said.className = 'out bad';
+  const why = PAYMENT_PROBLEMS[order.payment_problem] ?? ('入不了帳:' + order.payment_problem);
+  const amounts = order.payment_problem_amount === null || order.payment_problem_amount === undefined
+    ? ''
+    : '\n綠界說付了 NT$' + order.payment_problem_amount + ',這張單開的是 NT$' + order.amount + '。';
+  said.textContent = '⚠️ 收到一筆錢,但入不了帳 —— ' + why + '。' + amounts
+    + '\n這張單不會自己變成已付款。先去綠界後台看那一筆,處理完再按下面那顆。';
+  box.appendChild(said);
+
+  const acts = document.createElement('div');
+  acts.className = 'acts';
+  const done = document.createElement('button');
+  done.type = 'button';
+  done.textContent = '處理好了';
+  done.addEventListener('click', async () => {
+    done.disabled = true;
+    const { data, error } = await supabase.rpc('admin_resolve_payment_problem', {
+      p_order_id: order.id,
+    });
+    if (error) {
+      done.disabled = false;
+      write(said, describeError(error), 'bad');
+      return;
+    }
+    const outcome = Array.isArray(data) ? data[0] : data;
+    if (!outcome || !outcome.ok) {
+      done.disabled = false;
+      write(said, outcome && outcome.reason === 'order-not-found'
+        ? '查無這張單,重新整理看看。'
+        : '標不起來:' + ((outcome && outcome.reason) || 'unknown'), 'bad');
+      return;
+    }
+    // 整份重載:那張卡已經不屬於「收到錢卻入不了帳」那一份清單了,而橫幅上的數字要跟著變。
+    await loadOrders();
+  });
+  acts.appendChild(done);
+  box.appendChild(acts);
+
+  return box;
 }
 
 /**
