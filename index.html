@@ -96,7 +96,9 @@
   .order .acts { display: flex; gap: 8px; margin-top: 10px; }
   .order .acts button { margin: 0; }
   .order .copy { border-color: var(--divider); }
-  /* 訂單狀態的分頁。目前這一格用實邊框,其餘用分隔線的顏色——同一排四顆,靠深淺分主次。 */
+  /* 「已退款」。同一排裡唯一不可逆、而且牽涉到錢的那一顆,顏色要跟旁邊分得開(#326)。 */
+  .order .danger { border-color: var(--bad); color: var(--bad); }
+  /* 訂單狀態的分頁。目前這一格用實邊框,其餘用分隔線的顏色——同一排五顆,靠深淺分主次。 */
   .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
   .tabs button { margin: 0; padding: 9px 4px; font-size: 14px; min-height: 42px; border-color: var(--divider); }
   .tabs button[aria-current="true"] { border-color: var(--accent); background: var(--bg); }
@@ -300,14 +302,17 @@ document.head.appendChild(gsi);
 // 待處理的訂單 -----------------------------------------------------------------
 
 /**
- * 訂單的四格,對上資料庫狀態機的四個落點(#99)。
+ * 訂單的五格,對上資料庫狀態機的五個落點(#99、#326)。
  *
  * 原本這一頁**寫死只查 paid**,而卡片上只有一顆「已在點點印下單」。按下去那張單變成
  * submitted,卡片就從畫面上永久消失——後台沒有第二個查詢、也沒有「已出貨」的按鈕,所以那張
  * 單再也推不動。`admin_advance_print_order` 只能往前,救不回來;使用者那一側於是永遠顯示
  * 「沖印中」,實體照片明明已經寄到了。這不是偶發,是**每一張單都會發生**。
  *
- * `empty` 是這一格沒有單時要說的話。四格的空狀態意思完全不同:「待處理」空著是好事,
+ * 「已退款」那一格存在的理由一模一樣:按下「已退款」之後那張單要還找得到,不然它就從後台
+ * 消失了,而消失的那張單正是最需要查得到的那一種。
+ *
+ * `empty` 是這一格沒有單時要說的話。五格的空狀態意思完全不同:「待處理」空著是好事,
  * 「出不了」空著也是好事,而「已下單」空著只是還沒輪到。
  */
 const ORDER_TABS = [
@@ -332,8 +337,14 @@ const ORDER_TABS = [
   {
     state: 'failed',
     label: '出不了',
-    hint: '收了錢但做不出來的。⚠️ 退款要自己去綠界後台辦,系統裡沒有這條路。',
+    hint: '收了錢但做不出來的。這幾張**一定要退款**:先去綠界後台按退刷,回來按卡片上的「已退款」。',
     empty: '沒有做不出來的訂單。',
+  },
+  {
+    state: 'refunded',
+    label: '已退款',
+    hint: '錢已經退回去的。留著查,沒有動作要做——使用者的 App 上這幾張寫的是「已退款」。',
+    empty: '還沒有退過款的訂單。',
   },
 ];
 
@@ -469,14 +480,44 @@ function orderCard(order) {
   });
   acts.appendChild(copy);
 
-  // 往前推一格的按鈕:每一格各自不同,最後兩格沒有動作(#99)。
-  const NEXT = { paid: ['submitted', '已在點點印下單'], submitted: ['shipped', '已出貨'] };
-  const next = NEXT[order.state];
-  if (next) {
+  // 推到下一格的按鈕:每一格各自不同(#99、#326)。一格可以有不只一顆——待處理的單既可以
+  // 往前推,也可以退款。已出貨與已退款那兩格是終點,沒有動作。
+  //
+  // 「已退款」為什麼只在待處理與出不了兩格出現:submitted 那一刻照片已經拿去印了,那時候
+  // 退款是純虧(產品負責人 2026-09-03 拍板)。這裡不畫是禮貌,資料庫那一側也擋著。
+  const ACTIONS = {
+    paid: [['submitted', '已在點點印下單'], ['refunded', '已退款']],
+    submitted: [['shipped', '已出貨']],
+    failed: [['refunded', '已退款']],
+  };
+  for (const [to, label] of ACTIONS[order.state] ?? []) {
     const done = document.createElement('button');
     done.type = 'button';
-    done.textContent = next[1];
-    done.addEventListener('click', () => void advance(order.id, next[0], done));
+    done.textContent = label;
+    if (to === 'refunded') {
+      done.className = 'danger';
+      // **只有這一顆要按兩次。** 其他幾顆按錯的代價是「去做那件事」;這一顆按錯的代價是
+      // 使用者的 App 上寫著「已退款」而錢根本沒動,而且推不回來(狀態機只能往前,要進
+      // Studio 以 postgres 身分改)。它就貼在「已在點點印下單」旁邊,手指滑一格就是它。
+      let armed = false;
+      let disarm = null;
+      done.addEventListener('click', () => {
+        if (!armed) {
+          armed = true;
+          done.textContent = '確定退過了?再按一次';
+          disarm = setTimeout(() => { armed = false; done.textContent = label; }, 5000);
+          return;
+        }
+        // 先解除再送出:推不動的時候(例如另一個分頁已經把它推到 submitted)這一顆會留在
+        // 畫面上,而它不該還舉著「再按一次」——那時候按下去等於沒有第二道關。
+        clearTimeout(disarm);
+        armed = false;
+        done.textContent = label;
+        void advance(order.id, to, done);
+      });
+    } else {
+      done.addEventListener('click', () => void advance(order.id, to, done));
+    }
     acts.appendChild(done);
   }
 
@@ -488,12 +529,24 @@ function orderCard(order) {
     card.appendChild(photosBlock(order));
   }
 
-  // 出不了的單要提醒退款,因為系統裡沒有那條路(狀態機沒有 refunded 這一格)。
+  // 出不了的單要提醒退款。第一版是人工退刷(#326):錢由人去綠界後台按,這一頁上那顆
+  // 「已退款」只負責記帳——所以順序講清楚,不然按了這裡卻沒去綠界,使用者看到「已退款」
+  // 而錢沒回去。
   if (order.state === 'failed') {
     const warn = document.createElement('div');
     warn.className = 'out bad';
-    warn.textContent = '這張收了錢但做不出來。退款要去綠界後台辦,系統不會自己退。';
+    warn.textContent = '這張收了錢但做不出來,一定要退款。'
+      + '先去綠界後台按退刷,錢真的退出去之後,再回來按上面的「已退款」記帳。';
     card.appendChild(warn);
+  }
+
+  // 已退款的單:講清楚使用者那一側現在看到什麼,免得又被問一次。
+  if (order.state === 'refunded') {
+    const note = document.createElement('div');
+    note.className = 'out';
+    note.textContent = '這張已經記成退款了。使用者的 App 上寫的是「已退款,錢會在幾個工作天內'
+      + '回到你原本的付款方式」。實際退了沒以綠界後台為準。';
+    card.appendChild(note);
   }
 
   return card;
@@ -514,7 +567,7 @@ const PHOTO_REASONS = {
   'not-authenticated': SESSION_GONE,
   'not-admin': '這個帳號不在管理員名單上。',
   'order-not-found': '查無這張單,重新整理訂單列表看看。',
-  'order-not-fulfilling': '這張單現在的狀態不該拿照片(還沒付款、或已經取消了)。',
+  'order-not-fulfilling': '這張單現在的狀態不該拿照片(還沒付款、已經取消、或已經退款了)。',
   'order-has-no-photos': '這張單裡一張照片都沒有。這不該發生,把單號記下來。',
   'photo-not-in-order': '這一張不屬於這張單,重新整理訂單列表再試一次。',
   'photo-file-missing': '這一張的檔案在儲存空間裡找不到,多半是已經被下架了。',
@@ -766,14 +819,21 @@ async function advance(orderId, to, button) {
     p_order_id: orderId,
     p_to: to,
   });
-  if (error) { button.disabled = false; say('ordersOut', describeError(error), 'bad'); return; }
+  // 話寫在清單最上面那一塊,而按鈕可能在幾張卡片以下——不捲過去的話,他只看到按鈕彈回來、
+  // 什麼都沒發生(#105 要的「留得下線索」,線索看不到等於沒有)。
+  const complain = (text) => {
+    button.disabled = false;
+    say('ordersOut', text, 'bad');
+    $('ordersOut').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
+  if (error) { complain(describeError(error)); return; }
 
   const outcome = Array.isArray(data) ? data[0] : data;
   if (!outcome || !outcome.ok) {
-    button.disabled = false;
-    say('ordersOut', outcome && outcome.reason === 'bad-transition'
+    complain(outcome && outcome.reason === 'bad-transition'
       ? '這張單的狀態已經不是這一格了(別的分頁或別台裝置推過了),重新整理看看。'
-      : '推不動這張單。', 'bad');
+      : '推不動這張單。');
     return;
   }
   // 推成功就整份重載:那張卡已經不屬於現在這一格了,留在畫面上只會讓人再點一次。它會出現
