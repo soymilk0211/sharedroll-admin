@@ -389,8 +389,9 @@ function orderCard(order) {
   // 不是「已經處理好了」。
   if (order.with_date_stamp) {
     const stamp = document.createElement('p');
-    stamp.className = 'out bad';
-    stamp.textContent = '⚠️ 這張單要在照片右下角印上拍攝日期 —— 下載到的原圖沒有日期,見 #330';
+    stamp.className = 'out';
+    stamp.textContent = '這張單要在照片右下角印上拍攝日期 —— 展開下面那一區,用每一張的'
+      + '「下載(含日期)」存檔,不要直接點縮圖(R2 上存的是沒有日期的原圖)。';
     card.appendChild(stamp);
   }
 
@@ -526,6 +527,20 @@ function photosBlock(order) {
         + (photo.stillExists === false ? '・⚠️ 已下架,抓不到檔案' : '');
       figure.appendChild(caption);
 
+      // 要印日期的那幾張,多一顆「下載(含日期)」(#330)。
+      //
+      // 上面那條「點縮圖開的是高畫質那一層」對這幾張**不適用**:R2 上存的是乾淨的原圖,
+      // 日期是合成上去的。貼進點點印的要是這顆按鈕存下來的那一份。
+      if (photo.dateStamp && photo.stillExists !== false) {
+        const stampButton = document.createElement('button');
+        stampButton.type = 'button';
+        stampButton.textContent = '下載(含日期)';
+        stampButton.addEventListener('click', () => {
+          void downloadWithDateStamp(stampButton, order.id, photo);
+        });
+        figure.appendChild(stampButton);
+      }
+
       grid.appendChild(figure);
     }
     show.textContent = '重新簽網址';
@@ -533,6 +548,89 @@ function photosBlock(order) {
   });
 
   return box;
+}
+
+/**
+ * 把日期畫上去,存成一個檔案(#330)。
+ *
+ * ## 為什麼是這一頁在畫,而不是伺服器
+ *
+ * R2 上存的照片**一律不含日期**(需求規格書 1.4)——日期是「存進相簿」的當下在手機上合成的。
+ * 送印這條路上沒有手機在現場,所以要有人補上。放在瀏覽器裡畫的理由是:這一頁本來就要把
+ * 那張圖載下來給人看,而 canvas 沒有伺服器那邊的記憶體與時間限制。
+ *
+ * ## 為什麼位元組要繞一手
+ *
+ * 圖不是從 R2 的 presigned URL 直接抓的,是跟 `admin-print-photos` 要的。canvas 一旦畫進一張
+ * 跨網域、沒有 CORS 標頭的圖就會被「污染」,`toBlob` 會直接拋例外,而 R2 的 presigned URL
+ * 預設不帶那個標頭。我們自己那一支的 CORS 是我們設的。
+ *
+ * ## 那組數字的形狀不在這裡
+ *
+ * 多邊形是伺服器算好交過來的(`_shared/date-stamp.ts`),這裡只負責照著填。座標是**以照片
+ * 寬度為 1 的比例**,所以乘上 `canvas.width` 就得到與 App 匯出時一模一樣的位置與大小。
+ * 這一頁不自己算幾何 —— 這個 repo 已經被「同一件事各寫一份」咬過兩次(#114、#118)。
+ */
+async function downloadWithDateStamp(button, orderId, photo) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = '合成中…';
+  try {
+    const { data, error } = await supabase.functions.invoke('admin-print-photos', {
+      body: { orderId: orderId, photoId: photo.photoId },
+    });
+    if (error) throw new Error(error.message || String(error));
+    // 回的是 JSON 就是被拒了(位元組那條路成功時回的是 image/*)。
+    if (!(data instanceof Blob) || data.type.indexOf('image/') !== 0) {
+      throw new Error('拿不到照片的檔案');
+    }
+
+    const bitmap = await createImageBitmap(data);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+
+    // 整組數字推到右下角。座標是比例,一律乘 canvas.width —— 連垂直方向也是,因為 App 那一份
+    // 的每一個尺寸都是由**寬度**推導的(見 export/date-stamp.ts 的檔頭)。
+    const scale = canvas.width;
+    const stamp = photo.dateStamp;
+    const originX = canvas.width - stamp.right * scale - stamp.width * scale;
+    const originY = canvas.height - stamp.bottom * scale - stamp.height * scale;
+    ctx.fillStyle = stamp.color;
+    for (const segment of stamp.segments) {
+      ctx.beginPath();
+      for (const [index, point] of segment.entries()) {
+        const x = originX + point[0] * scale;
+        const y = originY + point[1] * scale;
+        if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.95));
+    if (!blob) throw new Error('存不出檔案');
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'sharedroll-' + photo.ordinal + '-' + photo.photoId.slice(0, 8) + '.jpg';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // 立刻撤掉:這一份是整張高畫質照片,留在記憶體裡沒有意義。
+    URL.revokeObjectURL(url);
+    button.textContent = '已下載';
+  } catch (caught) {
+    // 直說。這一頁只有一個使用者,而他需要知道是哪一步壞了。
+    button.textContent = '失敗:' + (caught && caught.message ? caught.message : String(caught));
+  } finally {
+    button.disabled = false;
+    // 兩秒後把字換回來,不然按過的那顆永遠寫著「已下載」。
+    setTimeout(() => { button.textContent = label; }, 2000);
+  }
 }
 
 /**
