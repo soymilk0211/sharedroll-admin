@@ -975,9 +975,10 @@ async function stampOnto(blob, stamp) {
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
 
-  // 整組數字推到右下角。座標是比例,一律乘 canvas.width —— 連垂直方向也是,因為 App 那一份
-  // 的每一個尺寸都是由**寬度**推導的(見 export/date-stamp.ts 的檔頭)。
-  const scale = canvas.width;
+  // 整組數字推到右下角。座標是比例,一律乘照片的**長邊** —— 連垂直方向也是,因為 App 那一份
+  // 的每一個尺寸都是由長邊推導的(見 export/date-stamp.ts 的 `longEdge`,#390)。橫的照片長邊
+  // 是寬、直的是高:同一張相紙轉過來,那組數字要一樣大。
+  const scale = Math.max(canvas.width, canvas.height);
   const originX = canvas.width - stamp.right * scale - stamp.width * scale;
   const originY = canvas.height - stamp.bottom * scale - stamp.height * scale;
   ctx.fillStyle = stamp.color;
